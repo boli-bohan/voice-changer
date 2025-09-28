@@ -1,0 +1,87 @@
+.App {
+  text-align: center;
+  max-width: 780px;
+  margin: 0 auto;
+  padding: 2.5rem 2rem;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 16px;
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.04);
+}
+
+.app-header {
+  margin-bottom: 2.5rem;
+}
+
+.app-header h1 {
+  color: #1f2933;
+  margin-bottom: 0.5rem;
+  font-size: 2.25rem;
+  font-weight: 600;
+}
+
+.app-header p {
+  color: #4b5563;
+  font-size: 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.connection-status {
+  display: inline-block;
+  padding: 0.5rem 1.25rem;
+  border-radius: 999px;
+  font-weight: 500;
+  font-size: 0.9rem;
+  text-transform: capitalize;
+  border: 1px solid #d1d5db;
+  color: #1f2933;
+  background: #f9fafb;
+}
+
+.connection-status.connecting {
+  border-style: dashed;
+  opacity: 0.8;
+}
+
+.connection-status.connected {
+  border-color: #9ca3af;
+  background: #f4f4f5;
+}
+
+.connection-status.disconnected {
+  border-color: #e5e7eb;
+  background: #ffffff;
+  color: #6b7280;
+}
+
+.app-main {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 280px;
+}
+
+.interaction-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2rem;
+  width: 100%;
+}
+
+.app-footer {
+  margin-top: 2.5rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid #e5e7eb;
+  color: #6b7280;
+}
+
+.app-footer small {
+  font-size: 0.85rem;
+}
+
+#backend-url {
+  font-family: 'Courier New', monospace;
+  color: #111827;
+}

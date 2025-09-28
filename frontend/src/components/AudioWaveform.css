@@ -1,0 +1,65 @@
+.audio-waveform {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  color: #4b5563;
+}
+
+.audio-waveform-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 72px;
+}
+
+.waveform-bar {
+  width: 6px;
+  height: 16px;
+  border-radius: 3px;
+  background: linear-gradient(180deg, #d1d5db 0%, #9ca3af 100%);
+  transform-origin: bottom center;
+  opacity: 0.85;
+}
+
+.audio-waveform.mode-inactive .waveform-bar {
+  background: linear-gradient(180deg, #e5e7eb 0%, #cbd5e1 100%);
+}
+
+.audio-waveform.mode-input .waveform-bar {
+  animation: waveformInput 1.2s ease-in-out infinite;
+  animation-delay: calc(var(--wave-index) * 0.08s);
+}
+
+.audio-waveform.mode-output .waveform-bar {
+  animation: waveformOutput 1.6s ease-in-out infinite;
+  animation-delay: calc(var(--wave-index) * 0.1s);
+}
+
+.audio-waveform-caption {
+  margin: 0;
+  font-size: 0.85rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #6b7280;
+}
+
+@keyframes waveformInput {
+  0%,
+  100% {
+    transform: scaleY(0.35);
+  }
+  50% {
+    transform: scaleY(1.05);
+  }
+}
+
+@keyframes waveformOutput {
+  0%,
+  100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(0.8);
+  }
+}
