@@ -1,26 +1,29 @@
 #!/usr/bin/env python3
 """
-WebSocket client for testing voice changer server.
+WebSocket test client for voice changer server.
 
-This client mimics the behavior of the frontend UI by:
+This enhanced test client mimics the behavior of the frontend UI and provides verification:
 1. Connecting to the WebSocket server
 2. Sending start_recording message
 3. Streaming audio file data in chunks (like MediaRecorder would)
 4. Sending stop_recording message
 5. Receiving and saving the processed audio response
+6. Verifying output against expected results
 
 Usage:
-    python client.py [audio_file] [output_file]
-    python client.py test.m4a output.wav
+    python test_client.py <input_file> <output_file> [expected_file]
+    python test_client.py data/test_input.webm actual_output.wav data/test_output.wav
+    python test_client.py test.m4a output.wav
 """
 
 import asyncio
 import io
 import json
 import logging
-import sys
+import os
 from pathlib import Path
 
+import typer
 import websockets
 from pydub import AudioSegment
 from pydub.utils import which
@@ -38,17 +41,20 @@ if not which("ffmpeg"):
     logger.info("Install with: brew install ffmpeg (macOS) or apt-get install ffmpeg (Ubuntu)")
 
 
-class VoiceChangerClient:
+class VoiceChangerTestClient:
     def __init__(self, server_url: str = "ws://localhost:8000/ws"):
         self.server_url = server_url
         self.websocket = None
         self.received_audio = []
         self.processing_complete = False
+        self.test_passed = False
 
     async def connect(self):
         """Connect to the WebSocket server."""
         logger.info(f"Connecting to {self.server_url}")
-        self.websocket = await websockets.connect(self.server_url)
+        # Set proper Origin header to pass the server's CheckOrigin check
+        extra_headers = {"Origin": "http://localhost:5173"}
+        self.websocket = await websockets.connect(self.server_url, additional_headers=extra_headers)
         logger.info("✅ Connected to server")
 
     async def disconnect(self):
@@ -140,7 +146,7 @@ class VoiceChangerClient:
 
                         logger.info(f"📨 Received {msg_type}: {msg_content}")
 
-                        if msg_type == "audio_complete":
+                        if msg_type == "audio_complete" or msg_type == "streaming_completed" or msg_type == "done":
                             logger.info("🎵 Audio processing completed!")
                             self.processing_complete = True
                             break
@@ -161,7 +167,7 @@ class VoiceChangerClient:
         except Exception as e:
             logger.error(f"❌ Error receiving messages: {str(e)}")
 
-    def save_received_audio(self, output_file: str):
+    def save_received_audio(self, output_file: str) -> bool:
         """Save received audio chunks to file."""
         if not self.received_audio:
             logger.warning("⚠️ No audio data received to save")
@@ -184,7 +190,46 @@ class VoiceChangerClient:
             logger.error(f"❌ Failed to save audio: {str(e)}")
             return False
 
-    async def process_audio_file(self, input_file: str, output_file: str = "output.wav"):
+    def verify_output(self, actual_file: str, expected_file: str | None = None) -> tuple[bool, str]:
+        """Verify the generated output against expected results by comparing file sizes."""
+        if not expected_file:
+            logger.info("🔍 No expected output file provided - skipping verification")
+            return True, "No verification performed"
+
+        if not Path(expected_file).exists():
+            logger.warning(f"⚠️ Expected file not found: {expected_file}")
+            return False, f"Expected file not found: {expected_file}"
+
+        if not Path(actual_file).exists():
+            logger.error(f"❌ Generated file not found: {actual_file}")
+            return False, f"Generated file not found: {actual_file}"
+
+        try:
+            # Get file sizes
+            actual_size = os.path.getsize(actual_file)
+            expected_size = os.path.getsize(expected_file)
+
+            # Check file size with strict tolerance (allow 1% difference)
+            size_diff_pct = abs(actual_size - expected_size) / expected_size * 100
+            size_ok = size_diff_pct <= 1
+
+            logger.info("🔍 File size comparison:")
+            logger.info(f"  Actual: {actual_size:,} bytes")
+            logger.info(f"  Expected: {expected_size:,} bytes")
+            logger.info(f"  Difference: {size_diff_pct:.1f}%")
+
+            if size_ok:
+                logger.info("🎉 Output verification PASSED! File sizes match within tolerance.")
+                return True, f"File size verification passed: {size_diff_pct:.1f}% difference"
+            else:
+                logger.error(f"💥 Output verification FAILED! File size difference too large: {size_diff_pct:.1f}%")
+                return False, f"File size verification failed: {size_diff_pct:.1f}% difference (>1% tolerance)"
+
+        except Exception as e:
+            logger.error(f"❌ Error during verification: {str(e)}")
+            return False, f"Verification error: {str(e)}"
+
+    async def process_audio_file(self, input_file: str, output_file: str = "output.wav", expected_file: str | None = None):
         """Main method to process an audio file through the voice changer."""
         try:
             # Step 1: Connect to server
@@ -214,14 +259,20 @@ class VoiceChangerClient:
             await listen_task
 
             # Step 8: Save result
-            success = self.save_received_audio(output_file)
+            save_success = self.save_received_audio(output_file)
 
-            if success:
-                logger.info(f"🎉 Voice changing completed! Output saved to: {output_file}")
-            else:
+            if not save_success:
                 logger.error("❌ Failed to save processed audio")
+                return False
 
-            return success
+            logger.info(f"🎉 Voice changing completed! Output saved to: {output_file}")
+
+            # Step 9: Verify output if expected file provided
+            verify_success, verify_msg = self.verify_output(output_file, expected_file)
+            logger.info(f"📊 Verification result: {verify_msg}")
+
+            self.test_passed = verify_success
+            return save_success and (verify_success if expected_file else True)
 
         except Exception as e:
             logger.error(f"❌ Error processing audio file: {str(e)}")
@@ -231,35 +282,118 @@ class VoiceChangerClient:
             await self.disconnect()
 
 
-async def main():
-    """Main function."""
-    # Parse command line arguments
-    if len(sys.argv) < 2:
-        print("Usage: python client.py <input_file> [output_file]")
-        print("Example: python client.py data/test_input.webm output.wav")
-        print("Example: python client.py test.m4a output.wav")
-        sys.exit(1)
+app = typer.Typer(help="Voice Changer End-to-End Test Client")
 
-    input_file = sys.argv[1]
-    output_file = sys.argv[2] if len(sys.argv) > 2 else "output.wav"
 
-    # Validate input file
-    if not Path(input_file).exists():
-        logger.error(f"Input file not found: {input_file}")
-        sys.exit(1)
+@app.command()
+def main_sync(
+    input_file: Path | None = typer.Argument(
+        None,
+        help="Input audio file path",
+    ),
+    output_file: Path | None = typer.Argument(
+        None,
+        help="Output audio file path",
+    ),
+    expected_file: Path | None = typer.Option(
+        None,
+        "--expected",
+        "-e",
+        help="Expected output file for verification",
+    ),
+    server_url: str = typer.Option(
+        "ws://localhost:8000/ws",
+        "--server",
+        "-s",
+        help="WebSocket server URL",
+    ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Enable verbose logging",
+    ),
+) -> None:
+    """Run end-to-end test of the voice changer system.
 
-    # Create client and process audio
-    client = VoiceChangerClient()
-    success = await client.process_audio_file(input_file, output_file)
+    By default, uses test files from the data/ directory if no arguments provided.
+    """
+    # Set up logging level
+    if verbose:
+        logging.basicConfig(level=logging.DEBUG)
+
+    # Use defaults if no arguments provided
+    if input_file is None:
+        input_file = Path("data/test_input.webm")
+        typer.echo("🔧 Using default input file: data/test_input.webm")
+
+    if output_file is None:
+        output_file = Path("output.wav")
+        typer.echo("🔧 Using default output file: output.wav")
+
+    if expected_file is None and input_file == Path("data/test_input.webm"):
+        expected_file = Path("data/test_output.wav")
+        typer.echo("🔧 Using default expected file: data/test_output.wav")
+
+    # Validate input file exists
+    if not input_file.exists():
+        typer.echo(f"❌ Input file not found: {input_file}", err=True)
+        raise typer.Exit(1)
+
+    # Validate expected file if provided
+    if expected_file and not expected_file.exists():
+        typer.echo(
+            f"⚠️ Expected file not found: {expected_file} - continuing without verification",
+            err=True
+        )
+        expected_file = None
+
+    typer.echo("\n🧪 Starting end-to-end test:")
+    typer.echo(f"   📁 Input: {input_file}")
+    typer.echo(f"   📄 Output: {output_file}")
+    if expected_file:
+        typer.echo(f"   ✅ Expected: {expected_file}")
+    typer.echo(f"   🌐 Server: {server_url}\n")
+
+    # Run the async main function
+    success = asyncio.run(run_test(
+        str(input_file), str(output_file), str(expected_file) if expected_file else None, server_url
+    ))
+
+    # Get the client result for test status
+    # This is a simplified approach - in a real scenario we'd return more details
+    client_test_passed = success  # Simplified for now
 
     if success:
-        logger.info("🎊 All done! You can play the output file to hear the result.")
-        print(f"\nTo play the result: afplay {output_file}")  # macOS
-        print(f"Or with any audio player: vlc {output_file}")
+        if expected_file and client_test_passed:
+            logger.info("🎊 END-TO-END TEST PASSED! All checks successful.")
+            typer.echo("\n✅ Test Result: PASSED", color=True)
+            typer.echo(f"📁 Output file: {output_file}")
+            typer.echo(f"🎵 Play result: afplay {output_file}")  # macOS
+        else:
+            logger.info("🎊 Audio processing completed successfully!")
+            typer.echo("\n✅ Processing Result: SUCCESS", color=True)
+            typer.echo(f"📁 Output file: {output_file}")
+            typer.echo(f"🎵 Play result: afplay {output_file}")  # macOS
     else:
-        logger.error("💥 Processing failed!")
-        sys.exit(1)
+        if expected_file:
+            logger.error("💥 END-TO-END TEST FAILED!")
+            typer.echo("\n❌ Test Result: FAILED", color=True, err=True)
+        else:
+            logger.error("💥 Audio processing failed!")
+            typer.echo("\n❌ Processing Result: FAILED", color=True, err=True)
+        raise typer.Exit(1)
+
+
+async def run_test(
+    input_file: str, output_file: str, expected_file: str | None, server_url: str
+) -> bool:
+    """Async function to run the actual test."""
+    # Create client and process audio
+    client = VoiceChangerTestClient(server_url=server_url)
+    success = await client.process_audio_file(input_file, output_file, expected_file)
+    return success and (client.test_passed if expected_file else True)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    app()

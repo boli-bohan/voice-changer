@@ -13,20 +13,20 @@ import (
 
 // AudioFormat represents audio format parameters
 type AudioFormat struct {
-	SampleRate   int
-	Channels     int
+	SampleRate    int
+	Channels      int
 	BitsPerSample int
 }
 
 // StreamingAudioProcessor handles WebM -> PCM -> WAV conversion
 type StreamingAudioProcessor struct {
-	format       AudioFormat
-	webmBuffer   *bytes.Buffer
-	pcmBuffer    []int16
-	wavWriter    *WAVWriter
-	mu           sync.Mutex
-	inputFile    *os.File
-	tempDir      string
+	format     AudioFormat
+	webmBuffer *bytes.Buffer
+	pcmBuffer  []int16
+	wavWriter  *WAVWriter
+	mu         sync.Mutex
+	inputFile  *os.File
+	tempDir    string
 }
 
 // NewStreamingAudioProcessor creates a new audio processor
@@ -44,8 +44,8 @@ func NewStreamingAudioProcessor(sessionID string) (*StreamingAudioProcessor, err
 
 	processor := &StreamingAudioProcessor{
 		format: AudioFormat{
-			SampleRate:   44100,
-			Channels:     1,
+			SampleRate:    44100,
+			Channels:      1,
 			BitsPerSample: 16,
 		},
 		webmBuffer: &bytes.Buffer{},
@@ -147,8 +147,11 @@ func (p *StreamingAudioProcessor) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Close input file
+	var inputFileName string
+
+	// Close input file and store filename for cleanup
 	if p.inputFile != nil {
+		inputFileName = p.inputFile.Name()
 		p.inputFile.Close()
 	}
 
@@ -159,7 +162,14 @@ func (p *StreamingAudioProcessor) Close() error {
 
 	// Save final input as WAV for comparison
 	inputWAVPath := filepath.Join(p.tempDir, "input.wav")
-	return p.convertWebMToWAV(p.inputFile.Name(), inputWAVPath)
+	err := p.convertWebMToWAV(inputFileName, inputWAVPath)
+
+	// Remove temporary input file
+	if inputFileName != "" {
+		os.Remove(inputFileName)
+	}
+
+	return err
 }
 
 // convertWebMToWAV converts the final WebM file to WAV

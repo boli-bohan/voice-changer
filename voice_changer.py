@@ -4,11 +4,9 @@ Voice Changer PCM Worker Service - Raw PCM Audio Processing
 Simplified FastAPI WebSocket server for real-time pitch shifting on raw PCM data.
 """
 
-import asyncio
 import json
 import logging
 import struct
-from typing import List
 
 import librosa
 import numpy as np
@@ -29,7 +27,7 @@ class PCMAudioProcessor:
         self.sample_rate = sample_rate
 
         # Buffer for accumulating PCM samples
-        self.pcm_buffer: List[float] = []
+        self.pcm_buffer: list[float] = []
         self.min_chunk_size = int(sample_rate * 0.1)  # 100ms worth of samples
 
     def add_pcm_samples(self, pcm_data: bytes) -> np.ndarray | None:
@@ -154,6 +152,8 @@ async def websocket_pcm_processor(websocket: WebSocket):
                             "message": "PCM processing completed"
                         }))
                         logger.info("✅ Sent done message, PCM processing completed")
+                        # Break out of the loop after sending done message
+                        break
 
                     elif message_type == "config":
                         # Update processing configuration

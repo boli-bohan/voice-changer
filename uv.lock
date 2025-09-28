@@ -1548,6 +1548,7 @@ dependencies = [
     { name = "python-multipart" },
     { name = "scipy" },
     { name = "soundfile" },
+    { name = "typer" },
     { name = "uvicorn" },
     { name = "websockets" },
 ]
@@ -1573,6 +1574,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.14" },
     { name = "scipy", specifier = ">=1.11" },
     { name = "soundfile", specifier = ">=0.12" },
+    { name = "typer", specifier = ">=0.9" },
     { name = "uvicorn", specifier = ">=0.29" },
     { name = "websockets", specifier = ">=12.0" },
 ]

@@ -104,7 +104,7 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 		"status":             "healthy",
 		"active_connections": connManager.GetConnectionCount(),
 		"temp_directory":     "temp_audio",
-		"timestamp":         time.Now().Format(time.RFC3339),
+		"timestamp":          time.Now().Format(time.RFC3339),
 	}
 
 	w.Header().Set("Content-Type", "application/json")

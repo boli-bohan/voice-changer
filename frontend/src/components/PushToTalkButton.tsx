@@ -44,6 +44,10 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
       setAppState('error')
       setErrorMessage(error)
     }, []),
+    onPlaybackComplete: useCallback(() => {
+      // Server has finished sending all audio, transition to idle
+      setAppState('idle')
+    }, []),
   })
 
   const {

@@ -16,6 +16,7 @@ dependencies = [
     "aiofiles>=23.2",
     "pydub>=0.25",
     "modal>=0.64",
+    "typer>=0.9",
 ]
 
 [project.optional-dependencies]

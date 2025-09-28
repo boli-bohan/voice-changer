@@ -5,6 +5,7 @@ interface UseWebSocketProps {
   onStatusChange: (status: 'connecting' | 'connected' | 'disconnected') => void
   onProcessedAudio: (audioBlob: Blob) => void
   onError: (error: string) => void
+  onPlaybackComplete?: () => void
 }
 
 export const useWebSocket = ({
@@ -12,6 +13,7 @@ export const useWebSocket = ({
   onStatusChange,
   onProcessedAudio,
   onError,
+  onPlaybackComplete,
 }: UseWebSocketProps) => {
   const wsRef = useRef<WebSocket | null>(null)
   const [connectionState, setConnectionState] = useState<
@@ -73,6 +75,10 @@ export const useWebSocket = ({
 
             if (message.type === 'audio_complete') {
               flushAudioBuffer()
+            } else if (message.type === 'done') {
+              // Server has finished playing back all audio
+              flushAudioBuffer()
+              onPlaybackComplete?.()
             } else if (message.type === 'error') {
               onError(message.message || 'Unknown server error')
             }

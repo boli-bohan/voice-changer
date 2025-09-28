@@ -245,7 +245,7 @@ func StartRecording(client *ClientConnection) error {
 	}
 
 	client.Recording = true
-	client.InputBuffer = client.InputBuffer[:0]       // Reset input buffer
+	client.InputBuffer = client.InputBuffer[:0]         // Reset input buffer
 	client.ProcessedChunks = client.ProcessedChunks[:0] // Reset processed chunks
 
 	// Connect to voice changer worker
@@ -407,6 +407,10 @@ func StreamChunksToClient(client *ClientConnection) {
 	// Send completion message
 	sendMessage(client, "streaming_completed", "Audio streaming completed")
 	log.Printf("✅ Completed streaming playback for %s", client.ID)
+
+	// Send done message to signal client that all audio playback has finished
+	sendMessage(client, "done", "Audio playback finished")
+	log.Printf("🏁 Sent done message to %s", client.ID)
 }
 
 // StopRecordingAndProcess stops recording and processes the audio

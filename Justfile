@@ -86,10 +86,7 @@ build:
 
 clean:
 	@echo "Cleaning temporary files..."
-	rm -rf temp_audio/
-	rm -rf frontend/dist/
-	rm -rf frontend/node_modules/.vite/
-	rm -rf api/voice-changer-api
+	rm -rf api/temp_audio/
 	@echo "Cleanup complete"
 
 test:
