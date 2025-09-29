@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,7 +45,7 @@ func NewStreamingAudioProcessor(sessionID string) (*StreamingAudioProcessor, err
 		format: AudioFormat{
 			SampleRate:    44100,
 			Channels:      1,
-			BitsPerSample: 16,
+			BitsPerSample: 32,
 		},
 		webmBuffer: &bytes.Buffer{},
 		tempDir:    tempDir,
@@ -83,7 +84,7 @@ func (p *StreamingAudioProcessor) StoreWebMChunk(webmData []byte) error {
 }
 
 // DecodeFullWebMToPCM converts the stored WebM data to raw PCM samples
-func (p *StreamingAudioProcessor) DecodeFullWebMToPCM() ([]int16, error) {
+func (p *StreamingAudioProcessor) DecodeFullWebMToPCM() ([]float32, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -106,7 +107,7 @@ func (p *StreamingAudioProcessor) DecodeFullWebMToPCM() ([]int16, error) {
 }
 
 // decodeWebMToPCM uses FFmpeg to convert WebM to raw PCM data
-func (p *StreamingAudioProcessor) decodeWebMToPCM() ([]int16, error) {
+func (p *StreamingAudioProcessor) decodeWebMToPCM() ([]float32, error) {
 	// Create temporary output file for PCM
 	pcmFile, err := os.CreateTemp(p.tempDir, "temp_*.pcm")
 	if err != nil {
@@ -119,8 +120,8 @@ func (p *StreamingAudioProcessor) decodeWebMToPCM() ([]int16, error) {
 	cmd := exec.Command("ffmpeg",
 		"-y", // Overwrite output
 		"-i", p.inputFile.Name(),
-		"-f", "s16le", // 16-bit signed little endian
-		"-acodec", "pcm_s16le",
+		"-f", "f32le",
+		"-acodec", "pcm_f32le",
 		"-ar", fmt.Sprintf("%d", p.format.SampleRate),
 		"-ac", fmt.Sprintf("%d", p.format.Channels),
 		pcmFile.Name(),
@@ -140,17 +141,18 @@ func (p *StreamingAudioProcessor) decodeWebMToPCM() ([]int16, error) {
 		return nil, err
 	}
 
-	// Convert bytes to int16 samples
-	samples := make([]int16, len(pcmData)/2)
+	// Convert bytes to float32 samples
+	samples := make([]float32, len(pcmData)/4)
 	for i := 0; i < len(samples); i++ {
-		samples[i] = int16(binary.LittleEndian.Uint16(pcmData[i*2:]))
+		bits := binary.LittleEndian.Uint32(pcmData[i*4:])
+		samples[i] = math.Float32frombits(bits)
 	}
 
 	return samples, nil
 }
 
 // ProcessPCMChunk processes processed PCM data and writes to WAV
-func (p *StreamingAudioProcessor) ProcessPCMChunk(pcmData []int16) error {
+func (p *StreamingAudioProcessor) ProcessPCMChunk(pcmData []float32) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -192,7 +194,7 @@ func (p *StreamingAudioProcessor) convertWebMToWAV(webmPath, wavPath string) err
 	cmd := exec.Command("ffmpeg",
 		"-y", // Overwrite output
 		"-i", webmPath,
-		"-acodec", "pcm_s16le",
+		"-acodec", "pcm_f32le",
 		"-ar", fmt.Sprintf("%d", p.format.SampleRate),
 		"-ac", fmt.Sprintf("%d", p.format.Channels),
 		wavPath,
@@ -235,7 +237,7 @@ func NewWAVWriter(filename string, format AudioFormat) (*WAVWriter, error) {
 }
 
 // WriteSamples writes PCM samples to the WAV file
-func (w *WAVWriter) WriteSamples(samples []int16) error {
+func (w *WAVWriter) WriteSamples(samples []float32) error {
 	for _, sample := range samples {
 		if err := binary.Write(w.file, binary.LittleEndian, sample); err != nil {
 			return err
@@ -252,7 +254,8 @@ func (w *WAVWriter) Close() error {
 	}
 
 	// Calculate data size
-	dataSize := w.samplesCount * int64(w.format.BitsPerSample/8) * int64(w.format.Channels)
+	bytesPerSample := int64(w.format.BitsPerSample / 8)
+	dataSize := w.samplesCount * bytesPerSample
 
 	// Seek back to header and update with final sizes
 	if _, err := w.file.Seek(0, 0); err != nil {
@@ -281,7 +284,8 @@ func (w *WAVWriter) writeWAVHeader(dataSize int64) error {
 	// fmt chunk
 	w.file.WriteString("fmt ")
 	binary.Write(w.file, binary.LittleEndian, int32(16)) // chunk size
-	binary.Write(w.file, binary.LittleEndian, int16(1))  // PCM format
+	formatCode := int16(3)
+	binary.Write(w.file, binary.LittleEndian, formatCode)
 	binary.Write(w.file, binary.LittleEndian, int16(w.format.Channels))
 	binary.Write(w.file, binary.LittleEndian, int32(w.format.SampleRate))
 	binary.Write(w.file, binary.LittleEndian, byteRate)

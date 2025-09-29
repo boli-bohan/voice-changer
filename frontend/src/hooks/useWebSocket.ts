@@ -1,68 +1,180 @@
-import { useRef, useCallback, useState, useEffect } from 'react'
+import { useRef, useCallback, useState, useEffect, useMemo } from 'react'
+
+declare global {
+  interface Window {
+    webkitAudioContext?: typeof AudioContext
+  }
+}
 
 interface UseWebSocketProps {
   url: string
   onStatusChange: (status: 'connecting' | 'connected' | 'disconnected') => void
-  onProcessedAudio: (audioBlob: Blob) => void
   onError: (error: string) => void
   onPlaybackComplete?: () => void
   onPlaybackStarted?: () => void
 }
 
-interface AudioFormat {
-  sampleRate: number
-  channels: number
-  bitsPerSample: number
-  encoding: string
+const SAMPLE_RATE = 44100
+const CHANNELS = 1
+const JITTER_MS = 200
+
+const createWorkletUrl = () => {
+  const code = `
+class PCMQueue {
+  constructor() {
+    this.chunks = []
+    this.headIndex = 0
+    this.offset = 0
+    this.totalFrames = 0
+  }
+  push(arr) {
+    if (arr && arr.length) {
+      this.chunks.push(arr)
+      this.totalFrames += arr.length
+    }
+  }
+  popFrames(n) {
+    const out = new Float32Array(n)
+    let i = 0
+    while (i < n) {
+      const cur = this.chunks[this.headIndex]
+      if (!cur) break
+      const rem = cur.length - this.offset
+      const take = Math.min(rem, n - i)
+      out.set(cur.subarray(this.offset, this.offset + take), i)
+      i += take
+      this.offset += take
+      if (this.offset >= cur.length) {
+        this.headIndex++
+        this.offset = 0
+        if (this.headIndex > 32) {
+          this.chunks = this.chunks.slice(this.headIndex)
+          this.headIndex = 0
+        }
+      }
+    }
+    this.totalFrames -= i
+    return { filled: i, out }
+  }
+  clear() {
+    this.chunks = []
+    this.headIndex = 0
+    this.offset = 0
+    this.totalFrames = 0
+  }
 }
 
-const DEFAULT_AUDIO_FORMAT: AudioFormat = {
-  sampleRate: 44100,
-  channels: 1,
-  bitsPerSample: 16,
-  encoding: 'pcm_s16le',
-}
+class PCMPlayerProcessor extends AudioWorkletProcessor {
+  constructor(options) {
+    super()
+    this.channels = options?.processorOptions?.channels || 1
+    this.jitterFrames = options?.processorOptions?.jitterFrames || 0
+    this.started = false
+    this.underruns = 0
+    this.tick = 0
+    this.queues = Array.from({ length: this.channels }, () => new PCMQueue())
 
-const createWavBlobFromPcm = (pcmData: Uint8Array, format: AudioFormat): Blob => {
-  const { sampleRate, channels, bitsPerSample } = format
-  const headerSize = 44
-  const dataLength = pcmData.length
-  const buffer = new ArrayBuffer(headerSize + dataLength)
-  const view = new DataView(buffer)
-  const wavBytes = new Uint8Array(buffer)
-
-  const writeString = (offset: number, value: string) => {
-    for (let i = 0; i < value.length; i++) {
-      wavBytes[offset + i] = value.charCodeAt(i)
+    this.port.onmessage = (e) => {
+      const msg = e.data || {}
+      if (msg.type === 'push') {
+        const bufs = msg.buffers || []
+        for (let c = 0; c < this.channels; c++) {
+          const arr = bufs[c] ? new Float32Array(bufs[c]) : null
+          if (arr) this.queues[c].push(arr)
+        }
+      } else if (msg.type === 'flush') {
+        for (let q of this.queues) q.clear()
+        this.started = false
+        this.underruns = 0
+      }
     }
   }
 
-  const blockAlign = (channels * bitsPerSample) / 8
-  const byteRate = sampleRate * blockAlign
+  process(_, outputs) {
+    const output = outputs[0]
+    const frames = output[0].length
+    const bufferedFrames = this.queues[0].totalFrames
 
-  writeString(0, 'RIFF')
-  view.setUint32(4, 36 + dataLength, true)
-  writeString(8, 'WAVE')
-  writeString(12, 'fmt ')
-  view.setUint32(16, 16, true)
-  view.setUint16(20, 1, true)
-  view.setUint16(22, channels, true)
-  view.setUint32(24, sampleRate, true)
-  view.setUint32(28, byteRate, true)
-  view.setUint16(32, blockAlign, true)
-  view.setUint16(34, bitsPerSample, true)
-  writeString(36, 'data')
-  view.setUint32(40, dataLength, true)
+    if (!this.started) {
+      if (bufferedFrames >= this.jitterFrames) {
+        this.started = true
+      } else {
+        for (let c = 0; c < output.length; c++) output[c].fill(0)
+        if ((this.tick++ & 15) === 0) {
+          this.port.postMessage({
+            type: 'status',
+            bufferedFrames,
+            underruns: this.underruns,
+          })
+        }
+        return true
+      }
+    }
 
-  wavBytes.set(pcmData, headerSize)
+    let hadData = true
+    for (let c = 0; c < output.length; c++) {
+      const { filled, out } = this.queues[c].popFrames(frames)
+      if (filled < frames) hadData = false
+      output[c].set(out)
+    }
+    if (!hadData) this.underruns++
 
-  return new Blob([buffer], { type: 'audio/wav' })
+    if ((this.tick++ & 15) === 0) {
+      this.port.postMessage({
+        type: 'status',
+        bufferedFrames: this.queues[0].totalFrames,
+        underruns: this.underruns,
+      })
+    }
+
+    return true
+  }
+}
+
+registerProcessor('pcm-player', PCMPlayerProcessor)
+`
+
+  const blob = new Blob([code], { type: 'text/javascript' })
+  return URL.createObjectURL(blob)
+}
+
+const interleavedToPlanar = (data: Float32Array, channels: number) => {
+  if (channels === 1) {
+    return [data]
+  }
+
+  const frames = Math.floor(data.length / channels)
+  return Array.from({ length: channels }, (_, ch) => {
+    const channelData = new Float32Array(frames)
+    for (let i = 0; i < frames; i++) {
+      channelData[i] = data[i * channels + ch]
+    }
+    return channelData
+  })
+}
+
+const linearResample = (input: Float32Array, srcRate: number, dstRate: number) => {
+  if (srcRate === dstRate || input.length === 0) return input
+  const ratio = dstRate / srcRate
+  const outLen = Math.max(1, Math.floor(input.length * ratio))
+  const out = new Float32Array(outLen)
+  const scale = (input.length - 1) / (outLen - 1)
+
+  for (let i = 0; i < outLen; i++) {
+    const pos = i * scale
+    const idx = Math.floor(pos)
+    const frac = pos - idx
+    const a = input[idx]
+    const b = input[Math.min(idx + 1, input.length - 1)]
+    out[i] = a + (b - a) * frac
+  }
+
+  return out
 }
 
 export const useWebSocket = ({
   url,
   onStatusChange,
-  onProcessedAudio,
   onError,
   onPlaybackComplete,
   onPlaybackStarted,
@@ -71,170 +183,122 @@ export const useWebSocket = ({
   const [connectionState, setConnectionState] = useState<
     'connecting' | 'connected' | 'disconnected'
   >('disconnected')
-  const audioChunksRef = useRef<Uint8Array[]>([])
-  const hasPendingAudioRef = useRef(false)
-  const audioFormatRef = useRef<AudioFormat>(DEFAULT_AUDIO_FORMAT)
-  const audioContextRef = useRef<AudioContext | null>(null)
-  const playbackTimeRef = useRef(0)
-  const activeSourcesRef = useRef(new Set<AudioBufferSourceNode>())
+
+  const ctxRef = useRef<AudioContext | null>(null)
+  const nodeRef = useRef<AudioWorkletNode | null>(null)
+  const workletReadyRef = useRef(false)
   const playbackStartedRef = useRef(false)
   const completionPendingRef = useRef(false)
-  const streamingSupportedRef = useRef(false)
-  const isMountedRef = useRef(true)
-  const [streamingSupported, setStreamingSupported] = useState(false)
 
-  const updateStreamingSupported = useCallback((supported: boolean) => {
-    streamingSupportedRef.current = supported
-    if (isMountedRef.current) {
-      setStreamingSupported((prev) => (prev === supported ? prev : supported))
-    }
-  }, [])
+  const workletUrl = useMemo(() => createWorkletUrl(), [])
 
   const cleanupAudioPlayback = useCallback(() => {
-    activeSourcesRef.current.forEach((source) => {
-      try {
-        source.stop()
-      } catch (error) {
-        // Ignore errors caused by stopping already finished sources
-      }
-    })
-    activeSourcesRef.current.clear()
-    playbackTimeRef.current = 0
     playbackStartedRef.current = false
     completionPendingRef.current = false
 
-    if (audioContextRef.current) {
-      audioContextRef.current.close().catch(() => {
-        /* swallow close errors */
-      })
-      audioContextRef.current = null
+    try {
+      nodeRef.current?.port.postMessage({ type: 'flush' })
+    } catch {}
+
+    try {
+      nodeRef.current?.disconnect()
+    } catch {}
+
+    nodeRef.current = null
+    workletReadyRef.current = false
+
+    if (ctxRef.current) {
+      const ctx = ctxRef.current
+      ctxRef.current = null
+      void ctx.close()
     }
   }, [])
 
-  useEffect(
-    () => () => {
-      isMountedRef.current = false
+  useEffect(() => {
+    return () => {
       cleanupAudioPlayback()
-    },
-    [cleanupAudioPlayback],
-  )
+      URL.revokeObjectURL(workletUrl)
+    }
+  }, [cleanupAudioPlayback, workletUrl])
 
-  const ensureAudioContext = useCallback(async (): Promise<AudioContext | null> => {
-    if (typeof window === 'undefined') {
-      updateStreamingSupported(false)
+  const ensureAudioGraph = useCallback(async () => {
+    if (nodeRef.current && ctxRef.current) {
+      return nodeRef.current
+    }
+
+    const AudioCtx = window.AudioContext ?? window.webkitAudioContext
+    if (!AudioCtx) {
+      onError('Web Audio API is not supported in this browser')
       return null
     }
 
-    const AudioContextConstructor =
-      window.AudioContext ||
-      (window as typeof window & { webkitAudioContext?: typeof window.AudioContext }).webkitAudioContext
+    const ctx = new AudioCtx()
+    ctxRef.current = ctx
 
-    if (!AudioContextConstructor) {
-      updateStreamingSupported(false)
-      return null
+    if (ctx.state === 'suspended') {
+      await ctx.resume()
     }
 
-    if (!audioContextRef.current) {
-      audioContextRef.current = new AudioContextConstructor()
-    }
-
-    if (audioContextRef.current.state === 'suspended') {
-      try {
-        await audioContextRef.current.resume()
-      } catch (error) {
-        updateStreamingSupported(false)
-        return null
-      }
-    }
-
-    updateStreamingSupported(true)
-    return audioContextRef.current
-  }, [updateStreamingSupported])
-
-  const schedulePcmPlayback = useCallback(
-    async (pcmChunk: Uint8Array) => {
-      const format = audioFormatRef.current
-      const bytesPerSample = format.bitsPerSample / 8
-
-      if (bytesPerSample !== 2 || pcmChunk.length % bytesPerSample !== 0) {
-        updateStreamingSupported(false)
-        return
+    try {
+      if (!workletReadyRef.current) {
+        await ctx.audioWorklet.addModule(workletUrl)
+        workletReadyRef.current = true
       }
 
-      const audioContext = await ensureAudioContext()
-      if (!audioContext) {
-        return
-      }
+      const jitterFrames = Math.floor((JITTER_MS / 1000) * ctx.sampleRate)
+      const node = new AudioWorkletNode(ctx, 'pcm-player', {
+        numberOfInputs: 0,
+        numberOfOutputs: 1,
+        outputChannelCount: [CHANNELS],
+        processorOptions: { channels: CHANNELS, jitterFrames },
+      })
 
-      const totalSamples = pcmChunk.length / bytesPerSample
-      const frameCount = totalSamples / format.channels
-
-      if (!Number.isFinite(frameCount) || frameCount <= 0) {
-        return
-      }
-
-      const audioBuffer = audioContext.createBuffer(format.channels, frameCount, format.sampleRate)
-      const dataView = new DataView(pcmChunk.buffer, pcmChunk.byteOffset, pcmChunk.byteLength)
-      let offset = 0
-
-      for (let frame = 0; frame < frameCount; frame++) {
-        for (let channel = 0; channel < format.channels; channel++) {
-          const sample = dataView.getInt16(offset, true)
-          offset += bytesPerSample
-          const normalizedSample = Math.max(-1, Math.min(1, sample / 32768))
-          audioBuffer.getChannelData(channel)[frame] = normalizedSample
-        }
-      }
-
-      const source = audioContext.createBufferSource()
-      source.buffer = audioBuffer
-      source.connect(audioContext.destination)
-
-      const startTime = Math.max(playbackTimeRef.current, audioContext.currentTime)
-      source.start(startTime)
-      playbackTimeRef.current = startTime + audioBuffer.duration
-      activeSourcesRef.current.add(source)
-
-      source.onended = () => {
-        activeSourcesRef.current.delete(source)
-
-        if (activeSourcesRef.current.size === 0 && audioContextRef.current) {
-          playbackTimeRef.current = audioContextRef.current.currentTime
-
-          if (completionPendingRef.current) {
+      node.port.onmessage = (event: MessageEvent) => {
+        const msg = event.data || {}
+        if (msg.type === 'status') {
+          if (completionPendingRef.current && (msg.bufferedFrames ?? 0) === 0) {
             completionPendingRef.current = false
             onPlaybackComplete?.()
           }
         }
       }
 
+      node.connect(ctx.destination)
+      nodeRef.current = node
+      return node
+    } catch (error) {
+      console.error('Failed to initialise AudioWorklet', error)
+      cleanupAudioPlayback()
+      onError('Audio playback is not supported in this browser')
+      return null
+    }
+  }, [cleanupAudioPlayback, onError, onPlaybackComplete, workletUrl])
+
+  const handleAudioChunk = useCallback(
+    async (arrayBuffer: ArrayBuffer) => {
+      const node = await ensureAudioGraph()
+      if (!node || !ctxRef.current) return
+
+      completionPendingRef.current = false
+
+      const sourceRate = SAMPLE_RATE
+      const destRate = ctxRef.current.sampleRate
+
+      const interleaved = new Float32Array(arrayBuffer)
+      const planar = interleavedToPlanar(interleaved, CHANNELS).map((channel) =>
+        sourceRate === destRate ? channel : linearResample(channel, sourceRate, destRate),
+      )
+
+      const buffers = planar.map((channel) => channel.buffer)
+      node.port.postMessage({ type: 'push', buffers }, buffers)
+
       if (!playbackStartedRef.current) {
         playbackStartedRef.current = true
         onPlaybackStarted?.()
       }
     },
-    [ensureAudioContext, onPlaybackComplete, onPlaybackStarted, updateStreamingSupported],
+    [ensureAudioGraph, onPlaybackStarted],
   )
-
-  const flushAudioBuffer = useCallback(() => {
-    if (!hasPendingAudioRef.current || audioChunksRef.current.length === 0) {
-      return
-    }
-
-    const totalLength = audioChunksRef.current.reduce((sum, chunk) => sum + chunk.length, 0)
-    const combinedArray = new Uint8Array(totalLength)
-    let offset = 0
-
-    for (const chunk of audioChunksRef.current) {
-      combinedArray.set(chunk, offset)
-      offset += chunk.length
-    }
-
-    const audioBlob = createWavBlobFromPcm(combinedArray, audioFormatRef.current)
-    onProcessedAudio(audioBlob)
-    audioChunksRef.current = []
-    hasPendingAudioRef.current = false
-  }, [onProcessedAudio])
 
   const connect = useCallback((): Promise<void> => {
     return new Promise((resolve, reject) => {
@@ -247,6 +311,7 @@ export const useWebSocket = ({
       onStatusChange('connecting')
 
       const ws = new WebSocket(url)
+      ws.binaryType = 'arraybuffer'
       wsRef.current = ws
 
       ws.onopen = () => {
@@ -256,53 +321,30 @@ export const useWebSocket = ({
       }
 
       ws.onmessage = async (event) => {
-        try {
-          if (event.data instanceof Blob) {
-            // Binary audio data
-            const arrayBuffer = await event.data.arrayBuffer()
-            const uint8Array = new Uint8Array(arrayBuffer)
-            audioChunksRef.current.push(uint8Array)
-            hasPendingAudioRef.current = true
-            await schedulePcmPlayback(uint8Array)
-          } else {
-            // JSON message
-            const message = JSON.parse(event.data)
+        if (event.data instanceof ArrayBuffer) {
+          await handleAudioChunk(event.data)
+          return
+        }
 
-            if (message.type === 'audio_complete') {
-              flushAudioBuffer()
-            } else if (message.type === 'audio_format') {
-              const { sample_rate, channels, bits_per_sample, encoding } = message
-              audioFormatRef.current = {
-                sampleRate: sample_rate ?? DEFAULT_AUDIO_FORMAT.sampleRate,
-                channels: channels ?? DEFAULT_AUDIO_FORMAT.channels,
-                bitsPerSample: bits_per_sample ?? DEFAULT_AUDIO_FORMAT.bitsPerSample,
-                encoding: encoding ?? DEFAULT_AUDIO_FORMAT.encoding,
-              }
-            } else if (message.type === 'done') {
-              // Server has finished playing back all audio
-              flushAudioBuffer()
-              if (!streamingSupportedRef.current) {
-                completionPendingRef.current = false
-                onPlaybackComplete?.()
-              } else if (activeSourcesRef.current.size === 0) {
-                completionPendingRef.current = false
-                onPlaybackComplete?.()
-              } else {
-                completionPendingRef.current = true
-              }
-            } else if (message.type === 'error') {
-              onError(message.message || 'Unknown server error')
+        try {
+          const message = JSON.parse(event.data as string)
+          if (message.type === 'done') {
+            if (nodeRef.current) {
+              completionPendingRef.current = true
+            } else {
+              onPlaybackComplete?.()
             }
+          } else if (message.type === 'error') {
+            onError(message.message || 'Unknown server error')
           }
-        } catch (error) {
-          onError('Failed to process server message')
+        } catch {
+          // Ignore malformed messages
         }
       }
 
       ws.onerror = () => {
         setConnectionState('disconnected')
         onStatusChange('disconnected')
-        flushAudioBuffer()
         cleanupAudioPlayback()
         reject(new Error('WebSocket connection failed'))
       }
@@ -310,17 +352,16 @@ export const useWebSocket = ({
       ws.onclose = () => {
         setConnectionState('disconnected')
         onStatusChange('disconnected')
-        flushAudioBuffer()
         cleanupAudioPlayback()
       }
     })
   }, [
-    url,
-    onStatusChange,
-    flushAudioBuffer,
-    onError,
-    schedulePcmPlayback,
     cleanupAudioPlayback,
+    handleAudioChunk,
+    onError,
+    onPlaybackComplete,
+    onStatusChange,
+    url,
   ])
 
   const disconnect = useCallback(() => {
@@ -330,11 +371,8 @@ export const useWebSocket = ({
     }
     setConnectionState('disconnected')
     onStatusChange('disconnected')
-    flushAudioBuffer()
-    audioChunksRef.current = []
-    hasPendingAudioRef.current = false
     cleanupAudioPlayback()
-  }, [cleanupAudioPlayback, flushAudioBuffer, onStatusChange])
+  }, [cleanupAudioPlayback, onStatusChange])
 
   const sendMessage = useCallback(
     (message: any) => {
@@ -344,7 +382,7 @@ export const useWebSocket = ({
         onError('WebSocket not connected')
       }
     },
-    [onError]
+    [onError],
   )
 
   const sendAudioData = useCallback(
@@ -355,13 +393,12 @@ export const useWebSocket = ({
         onError('WebSocket not connected')
       }
     },
-    [onError]
+    [onError],
   )
 
   const startRecording = useCallback(() => {
-    void ensureAudioContext()
     sendMessage({ type: 'start_recording' })
-  }, [ensureAudioContext, sendMessage])
+  }, [sendMessage])
 
   const stopRecording = useCallback(() => {
     sendMessage({ type: 'stop_recording' })
@@ -375,6 +412,5 @@ export const useWebSocket = ({
     startRecording,
     stopRecording,
     connectionState,
-    streamingSupported,
   }
 }
