@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { useAudioRecorder } from '../hooks/useAudioRecorder'
 import './PushToTalkButton.css'
@@ -16,8 +16,6 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
 }) => {
   const [appState, setAppState] = useState<AppState>('idle')
   const [errorMessage, setErrorMessage] = useState<string>('')
-  const streamingSupportedRef = useRef(false)
-  const fallbackAudioUrlRef = useRef<string | null>(null)
 
   const {
     sendAudioData,
@@ -26,43 +24,9 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
     connectionState,
     startRecording: startWebSocketRecording,
     stopRecording: stopWebSocketRecording,
-    streamingSupported,
   } = useWebSocket({
     url: 'ws://localhost:8000/ws',
     onStatusChange: onConnectionStatusChange,
-    onProcessedAudio: useCallback((audioBlob: Blob) => {
-      if (fallbackAudioUrlRef.current) {
-        URL.revokeObjectURL(fallbackAudioUrlRef.current)
-        fallbackAudioUrlRef.current = null
-      }
-
-      if (streamingSupportedRef.current) {
-        // Streaming playback is already in progress via Web Audio; keep the blob for potential downloads.
-        fallbackAudioUrlRef.current = URL.createObjectURL(audioBlob)
-      } else {
-        setAppState('playing')
-        const objectUrl = URL.createObjectURL(audioBlob)
-        fallbackAudioUrlRef.current = objectUrl
-        const audio = new Audio(objectUrl)
-        audio.onended = () => {
-          setAppState('idle')
-          URL.revokeObjectURL(objectUrl)
-          fallbackAudioUrlRef.current = null
-        }
-        audio.onerror = () => {
-          setAppState('error')
-          setErrorMessage('Failed to play processed audio')
-          URL.revokeObjectURL(objectUrl)
-          fallbackAudioUrlRef.current = null
-        }
-        audio.play().catch((err) => {
-          setAppState('error')
-          setErrorMessage('Audio playback failed: ' + err.message)
-          URL.revokeObjectURL(objectUrl)
-          fallbackAudioUrlRef.current = null
-        })
-      }
-    }, [setAppState, setErrorMessage]),
     onError: useCallback((error: string) => {
       setAppState('error')
       setErrorMessage(error)
@@ -71,25 +35,9 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
       setAppState('playing')
     }, []),
     onPlaybackComplete: useCallback(() => {
-      if (streamingSupportedRef.current) {
-        setAppState('idle')
-      }
+      setAppState('idle')
     }, []),
   })
-
-  useEffect(() => {
-    streamingSupportedRef.current = streamingSupported
-  }, [streamingSupported])
-
-  useEffect(
-    () => () => {
-      if (fallbackAudioUrlRef.current) {
-        URL.revokeObjectURL(fallbackAudioUrlRef.current)
-        fallbackAudioUrlRef.current = null
-      }
-    },
-    [],
-  )
 
   const {
     startRecording: startAudioRecording,
@@ -156,10 +104,6 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
     setAppState('idle')
     setErrorMessage('')
     disconnect()
-    if (fallbackAudioUrlRef.current) {
-      URL.revokeObjectURL(fallbackAudioUrlRef.current)
-      fallbackAudioUrlRef.current = null
-    }
   }, [disconnect])
 
   const getButtonText = () => {

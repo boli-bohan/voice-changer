@@ -6,8 +6,6 @@ Simplified FastAPI WebSocket server for real-time pitch shifting on raw PCM data
 
 import json
 import logging
-import struct
-
 import librosa
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -35,18 +33,13 @@ class PCMAudioProcessor:
         Add raw PCM samples and return processed audio if enough data is available.
 
         Args:
-            pcm_data: Raw PCM data as bytes (16-bit signed little endian)
+            pcm_data: Raw PCM data as bytes (32-bit float little endian)
 
         Returns:
             Processed audio samples as numpy array, or None if not enough data
         """
-        # Convert bytes to int16 samples
-        sample_count = len(pcm_data) // 2
-        samples = struct.unpack(f"<{sample_count}h", pcm_data)
-
-        # Convert to float32 and normalize
-        float_samples = [s / 32768.0 for s in samples]
-        self.pcm_buffer.extend(float_samples)
+        float_samples = np.frombuffer(pcm_data, dtype=np.float32)
+        self.pcm_buffer.extend(float_samples.tolist())
 
         # Process if we have enough samples
         if len(self.pcm_buffer) >= self.min_chunk_size:
@@ -84,15 +77,9 @@ class PCMAudioProcessor:
         return None
 
     def numpy_to_pcm_bytes(self, audio_data: np.ndarray) -> bytes:
-        """Convert numpy audio data back to PCM bytes."""
-        # Ensure we're in the right range
-        audio_data = np.clip(audio_data, -1.0, 1.0)
-
-        # Convert to int16
-        int16_data = (audio_data * 32767).astype(np.int16)
-
-        # Pack to bytes
-        return struct.pack(f"<{len(int16_data)}h", *int16_data)
+        """Convert numpy audio data back to PCM float32 bytes."""
+        audio_data = np.clip(audio_data, -1.0, 1.0).astype(np.float32)
+        return audio_data.tobytes()
 
 
 @app.get("/")
