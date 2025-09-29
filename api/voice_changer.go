@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -16,6 +17,15 @@ import (
 type Message struct {
 	Type    string `json:"type"`
 	Message string `json:"message,omitempty"`
+}
+
+// AudioFormatMessage communicates PCM stream metadata to clients
+type AudioFormatMessage struct {
+	Type          string `json:"type"`
+	SampleRate    int    `json:"sample_rate"`
+	Channels      int    `json:"channels"`
+	BitsPerSample int    `json:"bits_per_sample"`
+	Encoding      string `json:"encoding"`
 }
 
 // VoiceChangerClient manages connection to the voice_changer.py worker
@@ -234,6 +244,26 @@ func sendAudioData(client *ClientConnection, data []byte) {
 	client.Conn.WriteMessage(websocket.BinaryMessage, data)
 }
 
+// sendAudioFormat communicates the PCM stream format to the client UI
+func sendAudioFormat(client *ClientConnection) {
+	var format AudioFormat
+	if client.AudioProcessor != nil {
+		format = client.AudioProcessor.format
+	} else {
+		format = AudioFormat{SampleRate: 44100, Channels: 1, BitsPerSample: 16}
+	}
+
+	msg := AudioFormatMessage{
+		Type:          "audio_format",
+		SampleRate:    format.SampleRate,
+		Channels:      format.Channels,
+		BitsPerSample: format.BitsPerSample,
+		Encoding:      "pcm_s16le",
+	}
+
+	client.Conn.WriteJSON(msg)
+}
+
 // StartRecording initiates recording session
 func StartRecording(client *ClientConnection) error {
 	client.mu.Lock()
@@ -274,27 +304,9 @@ func AddAudioChunk(client *ClientConnection, audioData []byte) {
 	log.Printf("📊 Added audio chunk to %s: %d bytes, buffer total: %d bytes",
 		client.ID, len(audioData), bufferSize)
 
-	// Process through new audio pipeline
-	if client.StreamingActive && client.AudioProcessor != nil {
-		// Convert WebM to PCM
-		pcmSamples, err := client.AudioProcessor.ProcessWebMChunk(audioData)
-		if err != nil {
-			log.Printf("Failed to process WebM chunk for %s: %v", client.ID, err)
-			return
-		}
-
-		if pcmSamples != nil {
-			// Convert PCM samples to bytes for sending to Python worker
-			pcmBytes := make([]byte, len(pcmSamples)*2)
-			for i, sample := range pcmSamples {
-				pcmBytes[i*2] = byte(sample)
-				pcmBytes[i*2+1] = byte(sample >> 8)
-			}
-
-			// Send PCM data to Python worker
-			if err := client.VoiceChanger.SendAudioChunk(pcmBytes); err != nil {
-				log.Printf("Failed to send PCM chunk to voice changer for %s: %v", client.ID, err)
-			}
+	if client.AudioProcessor != nil {
+		if err := client.AudioProcessor.StoreWebMChunk(audioData); err != nil {
+			log.Printf("Failed to store WebM chunk for %s: %v", client.ID, err)
 		}
 	}
 }
@@ -309,20 +321,34 @@ func ContinuousReceiver(client *ClientConnection) {
 		processedChunk, done, err := client.VoiceChanger.ReceiveAudioChunk()
 		if err != nil {
 			log.Printf("Error in continuous receiver for %s: %v", client.ID, err)
+			client.VoiceChanger.Close()
 			break
 		}
 
 		if done {
 			log.Printf("✅ Voice changer finished processing for %s", client.ID)
+			if !playbackStarted {
+				sendMessage(client, "streaming_started", "Starting audio playback")
+				sendAudioFormat(client)
+				sendMessage(client, "streaming_completed", "Audio streaming completed")
+				sendMessage(client, "done", "Audio playback finished")
+				log.Printf("🏁 Sent done message to %s without streamed chunks", client.ID)
+			}
+			client.VoiceChanger.Close()
 			break
 		}
 
 		if len(processedChunk) > 0 {
-			// Convert PCM bytes back to int16 samples
+			// Convert PCM bytes back to int16 samples for WAV debug output
+			if len(processedChunk)%2 != 0 {
+				log.Printf("Discarding misaligned PCM chunk for %s: %d bytes", client.ID, len(processedChunk))
+				continue
+			}
+
 			sampleCount := len(processedChunk) / 2
 			pcmSamples := make([]int16, sampleCount)
 			for i := 0; i < sampleCount; i++ {
-				pcmSamples[i] = int16(processedChunk[i*2]) | (int16(processedChunk[i*2+1]) << 8)
+				pcmSamples[i] = int16(binary.LittleEndian.Uint16(processedChunk[i*2:]))
 			}
 
 			// Write to WAV file for output
@@ -330,12 +356,11 @@ func ContinuousReceiver(client *ClientConnection) {
 				client.AudioProcessor.ProcessPCMChunk(pcmSamples)
 			}
 
-			// Convert to WAV format for streaming to client
-			wavBytes := convertPCMToWAVChunk(pcmSamples)
-
-			// Add to processed chunks for streaming
+			// Add raw PCM to processed chunks for streaming
+			chunkCopy := make([]byte, len(processedChunk))
+			copy(chunkCopy, processedChunk)
 			client.mu.Lock()
-			client.ProcessedChunks = append(client.ProcessedChunks, wavBytes)
+			client.ProcessedChunks = append(client.ProcessedChunks, chunkCopy)
 			client.mu.Unlock()
 
 			// Start streaming playback if this is the first chunk
@@ -344,27 +369,18 @@ func ContinuousReceiver(client *ClientConnection) {
 				playbackStarted = true
 			}
 
-			log.Printf("🎵 Received processed PCM chunk for %s: %d samples -> %d WAV bytes",
-				client.ID, len(pcmSamples), len(wavBytes))
+			log.Printf("🎵 Received processed PCM chunk for %s: %d samples -> %d bytes",
+				client.ID, len(pcmSamples), len(processedChunk))
 		}
 	}
 
 	log.Printf("🎧 Stopped continuous receiver for %s", client.ID)
 }
 
-// convertPCMToWAVChunk converts PCM samples to a WAV audio chunk for streaming
-func convertPCMToWAVChunk(samples []int16) []byte {
-	wavData := make([]byte, len(samples)*2)
-	for i, sample := range samples {
-		wavData[i*2] = byte(sample)
-		wavData[i*2+1] = byte(sample >> 8)
-	}
-	return wavData
-}
-
 // StartStreamingPlayback streams processed audio back to client
 func StartStreamingPlayback(client *ClientConnection) {
 	sendMessage(client, "streaming_started", "Starting audio playback")
+	sendAudioFormat(client)
 	log.Printf("🎵 Started streaming playback for %s", client.ID)
 
 	go StreamChunksToClient(client)
@@ -377,31 +393,33 @@ func StreamChunksToClient(client *ClientConnection) {
 	for {
 		client.mu.RLock()
 		recording := client.Recording
-		chunksLen := len(client.ProcessedChunks)
+		availableChunks := len(client.ProcessedChunks)
 		client.mu.RUnlock()
 
-		// Stream available chunks
-		for chunkIndex < chunksLen {
+		for chunkIndex < availableChunks {
 			client.mu.RLock()
 			if chunkIndex < len(client.ProcessedChunks) {
 				chunk := client.ProcessedChunks[chunkIndex]
 				client.mu.RUnlock()
 				sendAudioData(client, chunk)
 				chunkIndex++
-				time.Sleep(10 * time.Millisecond) // Small delay to prevent overwhelming
+				time.Sleep(10 * time.Millisecond)
 			} else {
 				client.mu.RUnlock()
 				break
 			}
 		}
 
-		// Exit if recording stopped AND all chunks have been streamed
-		if !recording && chunkIndex >= chunksLen {
+		client.mu.RLock()
+		recording = client.Recording
+		availableChunks = len(client.ProcessedChunks)
+		client.mu.RUnlock()
+
+		if !recording && chunkIndex >= availableChunks {
 			break
 		}
 
-		// Wait before checking for new chunks
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond)
 	}
 
 	// Send completion message
@@ -428,6 +446,46 @@ func StopRecordingAndProcess(client *ClientConnection) error {
 	client.mu.Unlock()
 	log.Printf("✅ Stopped recording for %s", client.ID)
 
+	// Decode buffered audio and forward raw PCM to the worker
+	if client.StreamingActive && client.AudioProcessor != nil {
+		log.Printf("🎛️ Decoding buffered WebM audio for %s", client.ID)
+		pcmSamples, err := client.AudioProcessor.DecodeFullWebMToPCM()
+		if err != nil {
+			log.Printf("Failed to decode WebM audio for %s: %v", client.ID, err)
+			sendMessage(client, "error", "Failed to decode recorded audio")
+		} else if len(pcmSamples) > 0 {
+			log.Printf("📥 Decoded %d PCM samples for %s", len(pcmSamples), client.ID)
+			chunkSamples := client.AudioProcessor.format.SampleRate / 10
+			if chunkSamples <= 0 {
+				chunkSamples = 4410
+			}
+
+			for start := 0; start < len(pcmSamples); start += chunkSamples {
+				end := start + chunkSamples
+				if end > len(pcmSamples) {
+					end = len(pcmSamples)
+				}
+
+				chunk := pcmSamples[start:end]
+				pcmBytes := make([]byte, len(chunk)*2)
+				for i, sample := range chunk {
+					binary.LittleEndian.PutUint16(pcmBytes[i*2:], uint16(sample))
+				}
+
+				if err := client.VoiceChanger.SendAudioChunk(pcmBytes); err != nil {
+					log.Printf("Failed to send PCM chunk to voice changer for %s: %v", client.ID, err)
+					break
+				}
+
+				log.Printf("📤 Sent PCM chunk to voice changer for %s: %d samples", client.ID, len(chunk))
+
+				time.Sleep(10 * time.Millisecond)
+			}
+		} else {
+			log.Printf("No PCM samples decoded for %s", client.ID)
+		}
+	}
+
 	// Send flush command to voice changer worker
 	if client.StreamingActive {
 		log.Printf("🔄 Sending flush command to voice changer for %s", client.ID)
@@ -435,11 +493,7 @@ func StopRecordingAndProcess(client *ClientConnection) error {
 			log.Printf("Failed to send flush to voice changer for %s: %v", client.ID, err)
 		}
 
-		// Give some time for final processing
-		time.Sleep(2 * time.Second)
-
-		// Disconnect from worker
-		client.VoiceChanger.Close()
+		client.StreamingActive = false
 	}
 
 	// Save session files for debugging
@@ -469,8 +523,8 @@ func SaveSessionFiles(client *ClientConnection) {
 	}
 	client.mu.RUnlock()
 
-	// Save input file as WAV
-	inputFile := filepath.Join(sessionDir, "input.wav")
+	// Save input file as WebM
+	inputFile := filepath.Join(sessionDir, "input.webm")
 	if err := os.WriteFile(inputFile, inputBuffer, 0644); err != nil {
 		log.Printf("Failed to save input file for %s: %v", client.ID, err)
 	} else {
@@ -479,11 +533,11 @@ func SaveSessionFiles(client *ClientConnection) {
 
 	// Save output file if we have processed audio
 	if len(outputBuffer) > 0 {
-		outputFile := filepath.Join(sessionDir, "output.wav")
+		outputFile := filepath.Join(sessionDir, "output.pcm")
 		if err := os.WriteFile(outputFile, outputBuffer, 0644); err != nil {
 			log.Printf("Failed to save output file for %s: %v", client.ID, err)
 		} else {
-			log.Printf("💾 Saved output audio: %s (%d bytes)", outputFile, len(outputBuffer))
+			log.Printf("💾 Saved output PCM audio: %s (%d bytes)", outputFile, len(outputBuffer))
 		}
 	}
 
