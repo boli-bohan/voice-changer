@@ -4,13 +4,21 @@ Voice Changer PCM Worker Service - Raw PCM Audio Processing
 Simplified FastAPI WebSocket server for real-time pitch shifting on raw PCM data.
 """
 
+import asyncio
 import json
 import logging
 import struct
 
+from fractions import Fraction
+from typing import Any
+
 import librosa
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+
+from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc.mediastreams import AudioStreamTrack
+from av import AudioFrame
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -19,10 +27,44 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Voice Changer PCM Worker", version="2.0.0")
 
 
+class PCMStreamTrack(AudioStreamTrack):
+    """Audio track that pushes PCM frames to a WebRTC peer connection."""
+
+    kind = "audio"
+
+    def __init__(self, sample_rate: int) -> None:
+        super().__init__()
+        self.sample_rate = sample_rate
+        self._queue: asyncio.Queue[bytes] = asyncio.Queue()
+        self._pts: int = 0
+
+    async def recv(self) -> AudioFrame:
+        pcm_bytes = await self._queue.get()
+        sample_count = len(pcm_bytes) // 2
+        frame = AudioFrame(format="s16", layout="mono", samples=sample_count)
+        frame.planes[0].update(pcm_bytes)
+        frame.sample_rate = self.sample_rate
+        frame.time_base = Fraction(1, self.sample_rate)
+        frame.pts = self._pts
+        self._pts += sample_count
+        return frame
+
+    async def queue_pcm(self, pcm_bytes: bytes) -> None:
+        await self._queue.put(pcm_bytes)
+
+    def reset(self) -> None:
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+        self._pts = 0
+
+
 class PCMAudioProcessor:
     """Real-time streaming audio processor for raw PCM data."""
 
-    def __init__(self, pitch_shift_semitones: float = 4.0, sample_rate: int = 44100):
+    def __init__(self, pitch_shift_semitones: float = 4.0, sample_rate: int = 48000):
         self.pitch_shift_semitones = pitch_shift_semitones
         self.sample_rate = sample_rate
 
@@ -95,6 +137,111 @@ class PCMAudioProcessor:
         return struct.pack(f"<{len(int16_data)}h", *int16_data)
 
 
+class WorkerSession:
+    """Session state for a single worker WebSocket connection."""
+
+    def __init__(
+        self, websocket: WebSocket, pitch_shift: float = 4.0, sample_rate: int = 48000
+    ) -> None:
+        self.websocket = websocket
+        self.processor = PCMAudioProcessor(
+            pitch_shift_semitones=pitch_shift, sample_rate=sample_rate
+        )
+        self.pitch_shift = pitch_shift
+        self.sample_rate = sample_rate
+        self.pc: RTCPeerConnection | None = None
+        self.track: PCMStreamTrack | None = None
+        self.streaming_started = False
+
+    async def ensure_peer_connection(self) -> None:
+        if self.pc is not None:
+            return
+
+        self.pc = RTCPeerConnection()
+        self.track = PCMStreamTrack(self.sample_rate)
+        self.pc.addTrack(self.track)
+
+        @self.pc.on("icecandidate")
+        async def on_icecandidate(candidate: Any) -> None:
+            if candidate is None:
+                return
+            payload = {
+                "type": "webrtc_ice_candidate",
+                "candidate": {
+                    "candidate": candidate.candidate,
+                    "sdpMid": candidate.sdpMid,
+                    "sdpMLineIndex": candidate.sdpMLineIndex,
+                },
+            }
+            await self.websocket.send_text(json.dumps(payload))
+
+        @self.pc.on("connectionstatechange")
+        async def on_state_change() -> None:
+            logger.info("WebRTC connection state changed: %s", self.pc.connectionState)  # type: ignore[arg-type]
+
+    async def handle_offer(self, sdp: str, sdp_type: str | None) -> None:
+        if self.pc is not None:
+            await self.close()
+
+        await self.ensure_peer_connection()
+
+        if sdp_type is None or sdp_type == "":
+            sdp_type = "offer"
+
+        offer = RTCSessionDescription(sdp=sdp, type=sdp_type)
+        assert self.pc is not None
+        await self.pc.setRemoteDescription(offer)
+        answer = await self.pc.createAnswer()
+        await self.pc.setLocalDescription(answer)
+
+        response = {
+            "type": "webrtc_answer",
+            "sdp": self.pc.localDescription.sdp if self.pc.localDescription else "",
+            "sdp_type": self.pc.localDescription.type if self.pc.localDescription else "answer",
+        }
+        await self.websocket.send_text(json.dumps(response))
+
+    async def add_ice_candidate(self, payload: dict[str, Any]) -> None:
+        if self.pc is None:
+            return
+
+        candidate = payload.get("candidate")
+        if not candidate:
+            return
+
+        rtc_candidate = candidate
+        await self.pc.addIceCandidate(rtc_candidate)
+
+    async def queue_processed_audio(self, pcm_bytes: bytes) -> None:
+        if not self.streaming_started:
+            await self.websocket.send_text(
+                json.dumps({"type": "streaming_started", "message": "Starting audio playback"})
+            )
+            self.streaming_started = True
+
+        if self.track is not None:
+            await self.track.queue_pcm(pcm_bytes)
+        else:
+            await self.websocket.send_bytes(pcm_bytes)
+
+    async def flush(self) -> None:
+        if self.streaming_started:
+            await self.websocket.send_text(
+                json.dumps({"type": "streaming_completed", "message": "Audio streaming completed"})
+            )
+            self.streaming_started = False
+
+    async def close(self) -> None:
+        if self.pc is not None:
+            await self.pc.close()
+        self.pc = None
+        if self.track is not None:
+            self.track.reset()
+            self.track.stop()
+        self.track = None
+        self.streaming_started = False
+
+
 @app.get("/")
 async def get_status():
     """Health check endpoint."""
@@ -117,18 +264,15 @@ async def websocket_pcm_processor(websocket: WebSocket):
     """WebSocket endpoint for real-time PCM voice processing."""
     await websocket.accept()
 
-    # Initialize processor for this connection
-    processor = PCMAudioProcessor(pitch_shift_semitones=4.0)
+    session = WorkerSession(websocket)
 
     logger.info("🔊 Voice changer PCM worker: New processing connection established")
 
     try:
         while True:
-            # Receive data from Go API server
             data = await websocket.receive()
 
             if "text" in data:
-                # Handle control messages
                 try:
                     message = json.loads(data["text"])
                     message_type = message.get("type")
@@ -136,51 +280,63 @@ async def websocket_pcm_processor(websocket: WebSocket):
                     if message_type == "flush":
                         logger.info("🔄 Received flush command, processing remaining audio")
 
-                        # Process any remaining audio
-                        final_chunk = processor.flush_remaining()
+                        final_chunk = session.processor.flush_remaining()
                         if final_chunk is not None:
-                            pcm_bytes = processor.numpy_to_pcm_bytes(final_chunk)
-                            await websocket.send_bytes(pcm_bytes)
+                            pcm_bytes = session.processor.numpy_to_pcm_bytes(final_chunk)
+                            await session.queue_processed_audio(pcm_bytes)
 
-                        # Send done message
+                        await session.flush()
                         await websocket.send_text(
                             json.dumps({"type": "done", "message": "PCM processing completed"})
                         )
                         logger.info("✅ Sent done message, PCM processing completed")
-                        # Break out of the loop after sending done message
                         break
 
                     elif message_type == "config":
-                        # Update processing configuration
                         pitch_shift = message.get("pitch_shift", 4.0)
-                        processor.pitch_shift_semitones = pitch_shift
-                        logger.info(f"🎛️ Updated pitch shift to {pitch_shift} semitones")
+                        session.processor.pitch_shift_semitones = pitch_shift
+                        session.pitch_shift = pitch_shift
+                        logger.info("🎛️ Updated pitch shift to %s semitones", pitch_shift)
 
                         await websocket.send_text(
                             json.dumps({"type": "config_updated", "pitch_shift": pitch_shift})
                         )
 
+                    elif message_type == "webrtc_offer":
+                        sdp = message.get("sdp", "")
+                        sdp_type = message.get("sdp_type")
+                        if not sdp:
+                            logger.warning("Received empty WebRTC offer")
+                            continue
+                        await session.handle_offer(sdp, sdp_type)
+
+                    elif message_type == "webrtc_ice_candidate":
+                        await session.add_ice_candidate(message)
+
+                    else:
+                        logger.warning("⚠️ Unknown control message type received: %s", message_type)
+
                 except json.JSONDecodeError:
-                    logger.error("Invalid JSON received")
+                    logger.error("❌ Failed to parse control message as JSON")
 
             elif "bytes" in data:
-                # Handle raw PCM data
                 pcm_data = data["bytes"]
                 logger.info("🎵 Received PCM chunk: %d bytes", len(pcm_data))
 
-                # Process the PCM data
-                processed_chunk = processor.add_pcm_samples(pcm_data)
+                processed_chunk = session.processor.add_pcm_samples(pcm_data)
 
                 if processed_chunk is not None:
-                    # Convert back to PCM bytes and send
-                    pcm_bytes = processor.numpy_to_pcm_bytes(processed_chunk)
-                    await websocket.send_bytes(pcm_bytes)
-                    logger.info("📤 Sent processed PCM chunk: %d bytes", len(pcm_bytes))
+                    processed_bytes = session.processor.numpy_to_pcm_bytes(processed_chunk)
+                    await session.queue_processed_audio(processed_bytes)
+                    logger.info("📤 Queued processed PCM chunk: %d bytes", len(processed_bytes))
 
     except WebSocketDisconnect:
         logger.info("🔌 Voice changer PCM worker: Connection disconnected")
     except Exception as e:
-        logger.error(f"❌ Voice changer PCM worker error: {str(e)}")
+        logger.error("❌ Voice changer PCM worker error: %s", e)
+    finally:
+        await session.flush()
+        await session.close()
 
 
 if __name__ == "__main__":

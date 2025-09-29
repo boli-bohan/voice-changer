@@ -16,8 +16,7 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
 }) => {
   const [appState, setAppState] = useState<AppState>('idle')
   const [errorMessage, setErrorMessage] = useState<string>('')
-  const streamingSupportedRef = useRef(false)
-  const fallbackAudioUrlRef = useRef<string | null>(null)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
 
   const {
     sendAudioData,
@@ -26,43 +25,10 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
     connectionState,
     startRecording: startWebSocketRecording,
     stopRecording: stopWebSocketRecording,
-    streamingSupported,
+    remoteStream,
   } = useWebSocket({
     url: 'ws://localhost:8000/ws',
     onStatusChange: onConnectionStatusChange,
-    onProcessedAudio: useCallback((audioBlob: Blob) => {
-      if (fallbackAudioUrlRef.current) {
-        URL.revokeObjectURL(fallbackAudioUrlRef.current)
-        fallbackAudioUrlRef.current = null
-      }
-
-      if (streamingSupportedRef.current) {
-        // Streaming playback is already in progress via Web Audio; keep the blob for potential downloads.
-        fallbackAudioUrlRef.current = URL.createObjectURL(audioBlob)
-      } else {
-        setAppState('playing')
-        const objectUrl = URL.createObjectURL(audioBlob)
-        fallbackAudioUrlRef.current = objectUrl
-        const audio = new Audio(objectUrl)
-        audio.onended = () => {
-          setAppState('idle')
-          URL.revokeObjectURL(objectUrl)
-          fallbackAudioUrlRef.current = null
-        }
-        audio.onerror = () => {
-          setAppState('error')
-          setErrorMessage('Failed to play processed audio')
-          URL.revokeObjectURL(objectUrl)
-          fallbackAudioUrlRef.current = null
-        }
-        audio.play().catch((err) => {
-          setAppState('error')
-          setErrorMessage('Audio playback failed: ' + err.message)
-          URL.revokeObjectURL(objectUrl)
-          fallbackAudioUrlRef.current = null
-        })
-      }
-    }, [setAppState, setErrorMessage]),
     onError: useCallback((error: string) => {
       setAppState('error')
       setErrorMessage(error)
@@ -71,25 +37,9 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
       setAppState('playing')
     }, []),
     onPlaybackComplete: useCallback(() => {
-      if (streamingSupportedRef.current) {
-        setAppState('idle')
-      }
+      setAppState('idle')
     }, []),
   })
-
-  useEffect(() => {
-    streamingSupportedRef.current = streamingSupported
-  }, [streamingSupported])
-
-  useEffect(
-    () => () => {
-      if (fallbackAudioUrlRef.current) {
-        URL.revokeObjectURL(fallbackAudioUrlRef.current)
-        fallbackAudioUrlRef.current = null
-      }
-    },
-    [],
-  )
 
   const {
     startRecording: startAudioRecording,
@@ -102,6 +52,32 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
       setErrorMessage(error)
     }, []),
   })
+
+  useEffect(() => {
+    const audioElement = audioRef.current
+
+    if (!audioElement) {
+      return
+    }
+
+    if (remoteStream) {
+      audioElement.srcObject = remoteStream
+      const playPromise = audioElement.play()
+      if (playPromise !== undefined) {
+        playPromise.catch((error) => {
+          setAppState('error')
+          setErrorMessage(
+            error instanceof Error
+              ? `Audio playback failed: ${error.message}`
+              : 'Audio playback failed'
+          )
+        })
+      }
+    } else {
+      audioElement.pause()
+      audioElement.srcObject = null
+    }
+  }, [remoteStream, setAppState, setErrorMessage])
 
   useEffect(() => {
     onAppStateChange?.(appState)
@@ -156,9 +132,9 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
     setAppState('idle')
     setErrorMessage('')
     disconnect()
-    if (fallbackAudioUrlRef.current) {
-      URL.revokeObjectURL(fallbackAudioUrlRef.current)
-      fallbackAudioUrlRef.current = null
+    if (audioRef.current) {
+      audioRef.current.pause()
+      audioRef.current.srcObject = null
     }
   }, [disconnect])
 
@@ -185,6 +161,7 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
 
   return (
     <div className="push-to-talk-container">
+      <audio ref={audioRef} autoPlay style={{ display: 'none' }} />
       <button
         className={getButtonClass()}
         onMouseDown={handleMouseDown}

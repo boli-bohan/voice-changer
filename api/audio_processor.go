@@ -42,7 +42,7 @@ func NewStreamingAudioProcessor(sessionID string) (*StreamingAudioProcessor, err
 
 	processor := &StreamingAudioProcessor{
 		format: AudioFormat{
-			SampleRate:    44100,
+			SampleRate:    48000,
 			Channels:      1,
 			BitsPerSample: 16,
 		},

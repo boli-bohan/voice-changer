@@ -19,7 +19,7 @@ export const useAudioRecorder = ({ onAudioData, onError }: UseAudioRecorderProps
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
-          sampleRate: 44100,
+          sampleRate: 48000,
         },
       })
 

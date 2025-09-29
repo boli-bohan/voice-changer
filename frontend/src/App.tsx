@@ -4,7 +4,9 @@ import AudioWaveform, { type AudioWaveformMode } from './components/AudioWavefor
 import './App.css'
 
 function App() {
-  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('disconnected')
+  const [connectionStatus, setConnectionStatus] = useState<
+    'connecting' | 'connected' | 'disconnected'
+  >('disconnected')
   const [waveformMode, setWaveformMode] = useState<AudioWaveformMode>('inactive')
 
   const handleAppStateChange = useCallback((state: AppState) => {
@@ -24,7 +26,7 @@ function App() {
   const waveformCaptions: Record<AudioWaveformMode, string> = {
     inactive: 'Awaiting audio',
     input: 'Capturing voice…',
-    output: 'Playing response…'
+    output: 'Playing response…',
   }
 
   return (
@@ -32,9 +34,7 @@ function App() {
       <header className="app-header">
         <h1>Voice Changer</h1>
         <p>Press and hold the button to record, release to process and play back</p>
-        <div className={`connection-status ${connectionStatus}`}>
-          Status: {connectionStatus}
-        </div>
+        <div className={`connection-status ${connectionStatus}`}>Status: {connectionStatus}</div>
       </header>
 
       <main className="app-main">

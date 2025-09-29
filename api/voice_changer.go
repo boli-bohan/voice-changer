@@ -15,8 +15,18 @@ import (
 
 // Message types for WebSocket communication
 type Message struct {
-	Type    string `json:"type"`
-	Message string `json:"message,omitempty"`
+	Type      string        `json:"type"`
+	Message   string        `json:"message,omitempty"`
+	SDP       string        `json:"sdp,omitempty"`
+	SDPType   string        `json:"sdp_type,omitempty"`
+	Candidate *ICECandidate `json:"candidate,omitempty"`
+}
+
+// ICECandidate represents a trickled ICE candidate from the client
+type ICECandidate struct {
+	Candidate     string  `json:"candidate"`
+	SDPMid        *string `json:"sdpMid,omitempty"`
+	SDPMLineIndex *uint16 `json:"sdpMLineIndex,omitempty"`
 }
 
 // AudioFormatMessage communicates PCM stream metadata to clients
@@ -28,11 +38,21 @@ type AudioFormatMessage struct {
 	Encoding      string `json:"encoding"`
 }
 
+const (
+	defaultSampleRate = 48000
+	defaultChannels   = 1
+	bitsPerSample     = 16
+)
+
 // VoiceChangerClient manages connection to the voice_changer.py worker
 type VoiceChangerClient struct {
-	conn      *websocket.Conn
-	connected bool
-	mu        sync.RWMutex
+	conn        *websocket.Conn
+	connected   bool
+	mu          sync.RWMutex
+	audioChan   chan []byte
+	controlChan chan Message
+	done        chan struct{}
+	closeOnce   sync.Once
 }
 
 // NewVoiceChangerClient creates a new client connection to the worker
@@ -61,8 +81,47 @@ func (vc *VoiceChangerClient) Connect() error {
 
 	vc.conn = conn
 	vc.connected = true
+	vc.audioChan = make(chan []byte, 32)
+	vc.controlChan = make(chan Message, 32)
+	vc.done = make(chan struct{})
+	vc.closeOnce = sync.Once{}
 	log.Println("🔗 Connected to voice changer worker: ws://127.0.0.1:8001/process")
+	go vc.readLoop()
 	return nil
+}
+
+func (vc *VoiceChangerClient) readLoop() {
+	for {
+		messageType, data, err := vc.conn.ReadMessage()
+		if err != nil {
+			vc.mu.Lock()
+			vc.connected = false
+			vc.mu.Unlock()
+			vc.signalClosed()
+			log.Printf("❌ Failed to receive from worker: %v", err)
+			return
+		}
+
+		switch messageType {
+		case websocket.BinaryMessage:
+			select {
+			case vc.audioChan <- data:
+			default:
+				log.Printf("⚠️ Dropping audio chunk from worker: channel full")
+			}
+		case websocket.TextMessage:
+			var msg Message
+			if err := json.Unmarshal(data, &msg); err != nil {
+				log.Printf("⚠️ Ignoring malformed worker message: %v", err)
+				continue
+			}
+			select {
+			case vc.controlChan <- msg:
+			default:
+				log.Printf("⚠️ Dropping worker control message %s: channel full", msg.Type)
+			}
+		}
+	}
 }
 
 // SendAudioChunk sends audio data to the worker
@@ -101,33 +160,54 @@ func (vc *VoiceChangerClient) SendFlush() error {
 	return nil
 }
 
-// ReceiveAudioChunk receives processed audio from the worker
-func (vc *VoiceChangerClient) ReceiveAudioChunk() ([]byte, bool, error) {
+func (vc *VoiceChangerClient) SendWebRTCOffer(sdp, sdpType string) error {
 	vc.mu.RLock()
 	defer vc.mu.RUnlock()
 
 	if !vc.connected || vc.conn == nil {
-		return nil, false, fmt.Errorf("not connected to worker")
+		return fmt.Errorf("not connected to worker")
 	}
 
-	messageType, data, err := vc.conn.ReadMessage()
-	if err != nil {
-		log.Printf("❌ Failed to receive from worker: %v", err)
-		vc.connected = false
-		return nil, false, err
+	msg := Message{Type: "webrtc_offer", SDP: sdp, SDPType: sdpType}
+	return vc.conn.WriteJSON(msg)
+}
+
+func (vc *VoiceChangerClient) SendICECandidate(candidate ICECandidate) error {
+	vc.mu.RLock()
+	defer vc.mu.RUnlock()
+
+	if !vc.connected || vc.conn == nil {
+		return fmt.Errorf("not connected to worker")
 	}
 
-	if messageType == websocket.BinaryMessage {
-		return data, false, nil
-	} else if messageType == websocket.TextMessage {
-		var msg Message
-		if err := json.Unmarshal(data, &msg); err == nil && msg.Type == "done" {
-			log.Println("✅ Voice changer worker finished processing")
-			return nil, true, nil
+	msg := Message{Type: "webrtc_ice_candidate", Candidate: &candidate}
+	return vc.conn.WriteJSON(msg)
+}
+
+func (vc *VoiceChangerClient) AudioChannel() <-chan []byte {
+	return vc.audioChan
+}
+
+func (vc *VoiceChangerClient) ControlChannel() <-chan Message {
+	return vc.controlChan
+}
+
+func (vc *VoiceChangerClient) Done() <-chan struct{} {
+	return vc.done
+}
+
+func (vc *VoiceChangerClient) signalClosed() {
+	vc.closeOnce.Do(func() {
+		if vc.done != nil {
+			close(vc.done)
 		}
-	}
-
-	return nil, false, nil
+		if vc.audioChan != nil {
+			close(vc.audioChan)
+		}
+		if vc.controlChan != nil {
+			close(vc.controlChan)
+		}
+	})
 }
 
 // Close closes the connection to the worker
@@ -139,6 +219,7 @@ func (vc *VoiceChangerClient) Close() error {
 		err := vc.conn.Close()
 		vc.conn = nil
 		vc.connected = false
+		vc.signalClosed()
 		log.Println("🔌 Disconnected from voice changer worker")
 		return err
 	}
@@ -155,6 +236,9 @@ type ClientConnection struct {
 	ProcessedChunks [][]byte
 	StreamingActive bool
 	AudioProcessor  *StreamingAudioProcessor
+	workerAnswers   chan Message
+	receiverActive  bool
+	writeMu         sync.Mutex
 	mu              sync.RWMutex
 }
 
@@ -196,6 +280,7 @@ func (cm *ConnectionManager) AddConnection(conn *websocket.Conn) *ClientConnecti
 		ProcessedChunks: make([][]byte, 0),
 		StreamingActive: false,
 		AudioProcessor:  audioProcessor,
+		workerAnswers:   make(chan Message, 1),
 	}
 
 	cm.connections[id] = client
@@ -236,12 +321,13 @@ func (cm *ConnectionManager) GetConnectionCount() int {
 // sendMessage sends a JSON message to the client
 func sendMessage(client *ClientConnection, msgType, message string) {
 	msg := Message{Type: msgType, Message: message}
-	client.Conn.WriteJSON(msg)
+	sendJSON(client, msg)
 }
 
-// sendAudioData sends binary audio data to the client
-func sendAudioData(client *ClientConnection, data []byte) {
-	client.Conn.WriteMessage(websocket.BinaryMessage, data)
+func sendJSON(client *ClientConnection, payload interface{}) error {
+	client.writeMu.Lock()
+	defer client.writeMu.Unlock()
+	return client.Conn.WriteJSON(payload)
 }
 
 // sendAudioFormat communicates the PCM stream format to the client UI
@@ -250,7 +336,7 @@ func sendAudioFormat(client *ClientConnection) {
 	if client.AudioProcessor != nil {
 		format = client.AudioProcessor.format
 	} else {
-		format = AudioFormat{SampleRate: 44100, Channels: 1, BitsPerSample: 16}
+		format = AudioFormat{SampleRate: defaultSampleRate, Channels: defaultChannels, BitsPerSample: bitsPerSample}
 	}
 
 	msg := AudioFormatMessage{
@@ -261,7 +347,36 @@ func sendAudioFormat(client *ClientConnection) {
 		Encoding:      "pcm_s16le",
 	}
 
-	client.Conn.WriteJSON(msg)
+	sendJSON(client, msg)
+}
+
+func ensureWorkerConnection(client *ClientConnection) error {
+	if err := client.VoiceChanger.Connect(); err != nil {
+		return err
+	}
+
+	startWorkerReceiver(client)
+
+	return nil
+}
+
+func startWorkerReceiver(client *ClientConnection) {
+	client.mu.Lock()
+	if client.receiverActive {
+		client.mu.Unlock()
+		return
+	}
+	client.receiverActive = true
+	client.mu.Unlock()
+
+	go func() {
+		defer func() {
+			client.mu.Lock()
+			client.receiverActive = false
+			client.mu.Unlock()
+		}()
+		ContinuousReceiver(client)
+	}()
 }
 
 // StartRecording initiates recording session
@@ -279,7 +394,7 @@ func StartRecording(client *ClientConnection) error {
 	client.ProcessedChunks = client.ProcessedChunks[:0] // Reset processed chunks
 
 	// Connect to voice changer worker
-	if err := client.VoiceChanger.Connect(); err != nil {
+	if err := ensureWorkerConnection(client); err != nil {
 		log.Printf("Failed to connect to voice changer worker for %s: %v", client.ID, err)
 		return err
 	}
@@ -287,9 +402,6 @@ func StartRecording(client *ClientConnection) error {
 	client.StreamingActive = true
 	log.Printf("✅ Started recording for connection %s", client.ID)
 	log.Printf("🎵 Streaming mode enabled for %s", client.ID)
-
-	// Start receiver goroutine
-	go ContinuousReceiver(client)
 
 	return nil
 }
@@ -314,121 +426,139 @@ func AddAudioChunk(client *ClientConnection, audioData []byte) {
 // ContinuousReceiver handles incoming data from voice changer worker
 func ContinuousReceiver(client *ClientConnection) {
 	log.Printf("🎧 Started continuous receiver for %s", client.ID)
-	playbackStarted := false
 
-	for client.VoiceChanger.connected {
-		// Receive processed PCM chunk
-		processedChunk, done, err := client.VoiceChanger.ReceiveAudioChunk()
-		if err != nil {
-			log.Printf("Error in continuous receiver for %s: %v", client.ID, err)
-			client.VoiceChanger.Close()
-			break
-		}
+	audioCh := client.VoiceChanger.AudioChannel()
+	controlCh := client.VoiceChanger.ControlChannel()
+	doneCh := client.VoiceChanger.Done()
+	playbackNotified := false
+	finished := false
 
-		if done {
-			log.Printf("✅ Voice changer finished processing for %s", client.ID)
-			if !playbackStarted {
-				sendMessage(client, "streaming_started", "Starting audio playback")
-				sendAudioFormat(client)
-				sendMessage(client, "streaming_completed", "Audio streaming completed")
-				sendMessage(client, "done", "Audio playback finished")
-				log.Printf("🏁 Sent done message to %s without streamed chunks", client.ID)
-			}
-			client.VoiceChanger.Close()
-			break
-		}
-
-		if len(processedChunk) > 0 {
-			// Convert PCM bytes back to int16 samples for WAV debug output
-			if len(processedChunk)%2 != 0 {
-				log.Printf("Discarding misaligned PCM chunk for %s: %d bytes", client.ID, len(processedChunk))
+	for audioCh != nil || controlCh != nil || doneCh != nil {
+		select {
+		case <-doneCh:
+			doneCh = nil
+		case chunk, ok := <-audioCh:
+			if !ok {
+				audioCh = nil
 				continue
 			}
 
-			sampleCount := len(processedChunk) / 2
-			pcmSamples := make([]int16, sampleCount)
-			for i := 0; i < sampleCount; i++ {
-				pcmSamples[i] = int16(binary.LittleEndian.Uint16(processedChunk[i*2:]))
+			if len(chunk) == 0 {
+				continue
 			}
 
-			// Write to WAV file for output
+			if len(chunk)%2 != 0 {
+				log.Printf("Discarding misaligned PCM chunk for %s: %d bytes", client.ID, len(chunk))
+				continue
+			}
+
+			sampleCount := len(chunk) / 2
+			pcmSamples := make([]int16, sampleCount)
+			for i := 0; i < sampleCount; i++ {
+				pcmSamples[i] = int16(binary.LittleEndian.Uint16(chunk[i*2:]))
+			}
+
 			if client.AudioProcessor != nil {
 				client.AudioProcessor.ProcessPCMChunk(pcmSamples)
 			}
 
-			// Add raw PCM to processed chunks for streaming
-			chunkCopy := make([]byte, len(processedChunk))
-			copy(chunkCopy, processedChunk)
+			chunkCopy := make([]byte, len(chunk))
+			copy(chunkCopy, chunk)
+
 			client.mu.Lock()
 			client.ProcessedChunks = append(client.ProcessedChunks, chunkCopy)
 			client.mu.Unlock()
 
-			// Start streaming playback if this is the first chunk
-			if !playbackStarted {
-				go StartStreamingPlayback(client)
-				playbackStarted = true
+			if !playbackNotified {
+				sendMessage(client, "streaming_started", "Starting audio playback")
+				sendAudioFormat(client)
+				playbackNotified = true
 			}
 
 			log.Printf("🎵 Received processed PCM chunk for %s: %d samples -> %d bytes",
-				client.ID, len(pcmSamples), len(processedChunk))
+				client.ID, len(pcmSamples), len(chunk))
+
+		case msg, ok := <-controlCh:
+			if !ok {
+				controlCh = nil
+				continue
+			}
+
+			switch msg.Type {
+			case "webrtc_answer":
+				select {
+				case client.workerAnswers <- msg:
+				default:
+					log.Printf("⚠️ Dropping redundant worker answer for %s", client.ID)
+				}
+			case "webrtc_ice_candidate":
+				if msg.Candidate != nil && msg.Candidate.Candidate != "" {
+					sendJSON(client, Message{Type: "webrtc_ice_candidate", Candidate: msg.Candidate})
+				}
+			case "streaming_started":
+				sendMessage(client, "streaming_started", msg.Message)
+				if !playbackNotified {
+					sendAudioFormat(client)
+					playbackNotified = true
+				}
+			case "streaming_completed":
+				sendMessage(client, "streaming_completed", msg.Message)
+			case "done":
+				if !finished {
+					sendMessage(client, "done", msg.Message)
+					finished = true
+				}
+			case "error":
+				sendMessage(client, "error", msg.Message)
+			default:
+				log.Printf("ℹ️ Worker message for %s: %s", client.ID, msg.Type)
+			}
 		}
 	}
 
+	if !finished {
+		sendMessage(client, "done", "Audio playback finished")
+	}
+	if !playbackNotified {
+		sendMessage(client, "streaming_completed", "Audio streaming completed")
+	}
 	log.Printf("🎧 Stopped continuous receiver for %s", client.ID)
 }
 
-// StartStreamingPlayback streams processed audio back to client
-func StartStreamingPlayback(client *ClientConnection) {
-	sendMessage(client, "streaming_started", "Starting audio playback")
-	sendAudioFormat(client)
-	log.Printf("🎵 Started streaming playback for %s", client.ID)
-
-	go StreamChunksToClient(client)
-}
-
-// StreamChunksToClient streams processed audio chunks to client
-func StreamChunksToClient(client *ClientConnection) {
-	chunkIndex := 0
-
-	for {
-		client.mu.RLock()
-		recording := client.Recording
-		availableChunks := len(client.ProcessedChunks)
-		client.mu.RUnlock()
-
-		for chunkIndex < availableChunks {
-			client.mu.RLock()
-			if chunkIndex < len(client.ProcessedChunks) {
-				chunk := client.ProcessedChunks[chunkIndex]
-				client.mu.RUnlock()
-				sendAudioData(client, chunk)
-				chunkIndex++
-				time.Sleep(10 * time.Millisecond)
-			} else {
-				client.mu.RUnlock()
-				break
-			}
-		}
-
-		client.mu.RLock()
-		recording = client.Recording
-		availableChunks = len(client.ProcessedChunks)
-		client.mu.RUnlock()
-
-		if !recording && chunkIndex >= availableChunks {
-			break
-		}
-
-		time.Sleep(50 * time.Millisecond)
+// ProcessWebRTCOffer forwards the SDP offer to the worker and waits for an answer
+func ProcessWebRTCOffer(client *ClientConnection, offerSDP, sdpType string) (*Message, error) {
+	if offerSDP == "" {
+		return nil, fmt.Errorf("empty SDP offer")
 	}
 
-	// Send completion message
-	sendMessage(client, "streaming_completed", "Audio streaming completed")
-	log.Printf("✅ Completed streaming playback for %s", client.ID)
+	if err := ensureWorkerConnection(client); err != nil {
+		return nil, err
+	}
 
-	// Send done message to signal client that all audio playback has finished
-	sendMessage(client, "done", "Audio playback finished")
-	log.Printf("🏁 Sent done message to %s", client.ID)
+	select {
+	case <-client.workerAnswers:
+	default:
+	}
+
+	if err := client.VoiceChanger.SendWebRTCOffer(offerSDP, sdpType); err != nil {
+		return nil, err
+	}
+
+	select {
+	case answer := <-client.workerAnswers:
+		return &answer, nil
+	case <-time.After(10 * time.Second):
+		return nil, fmt.Errorf("timeout waiting for worker answer")
+	}
+}
+
+// AddWebRTCCandidate adds a remote ICE candidate to the client's session
+func AddWebRTCCandidate(client *ClientConnection, candidate ICECandidate) error {
+	if err := ensureWorkerConnection(client); err != nil {
+		return err
+	}
+
+	return client.VoiceChanger.SendICECandidate(candidate)
 }
 
 // StopRecordingAndProcess stops recording and processes the audio
@@ -457,7 +587,7 @@ func StopRecordingAndProcess(client *ClientConnection) error {
 			log.Printf("📥 Decoded %d PCM samples for %s", len(pcmSamples), client.ID)
 			chunkSamples := client.AudioProcessor.format.SampleRate / 10
 			if chunkSamples <= 0 {
-				chunkSamples = 4410
+				chunkSamples = defaultSampleRate / 10
 			}
 
 			for start := 0; start < len(pcmSamples); start += chunkSamples {

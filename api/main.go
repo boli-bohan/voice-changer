@@ -53,6 +53,35 @@ func handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 
 			switch msg.Type {
+			case "webrtc_offer":
+				log.Printf("📡 Received WebRTC offer for %s", client.ID)
+				answer, err := ProcessWebRTCOffer(client, msg.SDP, msg.SDPType)
+				if err != nil {
+					log.Printf("❌ Failed to negotiate WebRTC for %s: %v", client.ID, err)
+					sendMessage(client, "error", "WebRTC negotiation failed")
+					continue
+				}
+
+				if answer != nil {
+					response := Message{
+						Type:    "webrtc_answer",
+						SDP:     answer.SDP,
+						SDPType: answer.SDPType,
+					}
+					if err := sendJSON(client, response); err != nil {
+						log.Printf("❌ Failed to send WebRTC answer to %s: %v", client.ID, err)
+					}
+				}
+
+			case "webrtc_ice_candidate":
+				if msg.Candidate == nil || msg.Candidate.Candidate == "" {
+					continue
+				}
+
+				if err := AddWebRTCCandidate(client, *msg.Candidate); err != nil {
+					log.Printf("⚠️ Failed to add ICE candidate for %s: %v", client.ID, err)
+				}
+
 			case "start_recording":
 				log.Printf("🎙️ Received start_recording for %s", client.ID)
 				if err := StartRecording(client); err != nil {
