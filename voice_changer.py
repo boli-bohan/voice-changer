@@ -13,7 +13,7 @@ import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Voice Changer PCM Worker", version="2.0.0")
@@ -42,7 +42,7 @@ class PCMAudioProcessor:
         """
         # Convert bytes to int16 samples
         sample_count = len(pcm_data) // 2
-        samples = struct.unpack(f'<{sample_count}h', pcm_data)
+        samples = struct.unpack(f"<{sample_count}h", pcm_data)
 
         # Convert to float32 and normalize
         float_samples = [s / 32768.0 for s in samples]
@@ -51,15 +51,13 @@ class PCMAudioProcessor:
         # Process if we have enough samples
         if len(self.pcm_buffer) >= self.min_chunk_size:
             # Extract chunk for processing
-            chunk = np.array(self.pcm_buffer[:self.min_chunk_size], dtype=np.float32)
-            self.pcm_buffer = self.pcm_buffer[self.min_chunk_size:]
+            chunk = np.array(self.pcm_buffer[: self.min_chunk_size], dtype=np.float32)
+            self.pcm_buffer = self.pcm_buffer[self.min_chunk_size :]
 
             # Apply pitch shifting
             try:
                 processed_chunk = librosa.effects.pitch_shift(
-                    chunk,
-                    sr=self.sample_rate,
-                    n_steps=self.pitch_shift_semitones
+                    chunk, sr=self.sample_rate, n_steps=self.pitch_shift_semitones
                 )
                 return processed_chunk
             except Exception as e:
@@ -76,9 +74,7 @@ class PCMAudioProcessor:
 
             try:
                 processed_chunk = librosa.effects.pitch_shift(
-                    chunk,
-                    sr=self.sample_rate,
-                    n_steps=self.pitch_shift_semitones
+                    chunk, sr=self.sample_rate, n_steps=self.pitch_shift_semitones
                 )
                 return processed_chunk
             except Exception as e:
@@ -96,7 +92,7 @@ class PCMAudioProcessor:
         int16_data = (audio_data * 32767).astype(np.int16)
 
         # Pack to bytes
-        return struct.pack(f'<{len(int16_data)}h', *int16_data)
+        return struct.pack(f"<{len(int16_data)}h", *int16_data)
 
 
 @app.get("/")
@@ -112,7 +108,7 @@ async def health_check():
         "status": "healthy",
         "service": "voice_changer_pcm_worker",
         "version": "2.0.0",
-        "capabilities": ["pitch_shifting", "real_time_pcm_processing", "raw_audio"]
+        "capabilities": ["pitch_shifting", "real_time_pcm_processing", "raw_audio"],
     }
 
 
@@ -147,10 +143,9 @@ async def websocket_pcm_processor(websocket: WebSocket):
                             await websocket.send_bytes(pcm_bytes)
 
                         # Send done message
-                        await websocket.send_text(json.dumps({
-                            "type": "done",
-                            "message": "PCM processing completed"
-                        }))
+                        await websocket.send_text(
+                            json.dumps({"type": "done", "message": "PCM processing completed"})
+                        )
                         logger.info("✅ Sent done message, PCM processing completed")
                         # Break out of the loop after sending done message
                         break
@@ -161,10 +156,9 @@ async def websocket_pcm_processor(websocket: WebSocket):
                         processor.pitch_shift_semitones = pitch_shift
                         logger.info(f"🎛️ Updated pitch shift to {pitch_shift} semitones")
 
-                        await websocket.send_text(json.dumps({
-                            "type": "config_updated",
-                            "pitch_shift": pitch_shift
-                        }))
+                        await websocket.send_text(
+                            json.dumps({"type": "config_updated", "pitch_shift": pitch_shift})
+                        )
 
                 except json.JSONDecodeError:
                     logger.error("Invalid JSON received")
@@ -172,7 +166,7 @@ async def websocket_pcm_processor(websocket: WebSocket):
             elif "bytes" in data:
                 # Handle raw PCM data
                 pcm_data = data["bytes"]
-                logger.debug(f"🎵 Processing PCM data: {len(pcm_data)} bytes")
+                logger.info("🎵 Received PCM chunk: %d bytes", len(pcm_data))
 
                 # Process the PCM data
                 processed_chunk = processor.add_pcm_samples(pcm_data)
@@ -181,7 +175,7 @@ async def websocket_pcm_processor(websocket: WebSocket):
                     # Convert back to PCM bytes and send
                     pcm_bytes = processor.numpy_to_pcm_bytes(processed_chunk)
                     await websocket.send_bytes(pcm_bytes)
-                    logger.debug(f"📤 Sent processed PCM: {len(pcm_bytes)} bytes")
+                    logger.info("📤 Sent processed PCM chunk: %d bytes", len(pcm_bytes))
 
     except WebSocketDisconnect:
         logger.info("🔌 Voice changer PCM worker: Connection disconnected")
@@ -194,10 +188,4 @@ if __name__ == "__main__":
 
     # For development/testing
     logger.info("🚀 Starting Voice Changer PCM Worker Service")
-    uvicorn.run(
-        "voice_changer_pcm:app",
-        host="127.0.0.1",
-        port=8001,
-        log_level="info",
-        reload=True
-    )
+    uvicorn.run("voice_changer_pcm:app", host="127.0.0.1", port=8001, log_level="info", reload=True)

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,7 +21,6 @@ type AudioFormat struct {
 type StreamingAudioProcessor struct {
 	format     AudioFormat
 	webmBuffer *bytes.Buffer
-	pcmBuffer  []int16
 	wavWriter  *WAVWriter
 	mu         sync.Mutex
 	inputFile  *os.File
@@ -49,7 +47,6 @@ func NewStreamingAudioProcessor(sessionID string) (*StreamingAudioProcessor, err
 			BitsPerSample: 16,
 		},
 		webmBuffer: &bytes.Buffer{},
-		pcmBuffer:  make([]int16, 0),
 		tempDir:    tempDir,
 		inputFile:  inputFile,
 	}
@@ -65,22 +62,44 @@ func NewStreamingAudioProcessor(sessionID string) (*StreamingAudioProcessor, err
 	return processor, nil
 }
 
-// ProcessWebMChunk processes incoming WebM audio data
-func (p *StreamingAudioProcessor) ProcessWebMChunk(webmData []byte) ([]int16, error) {
+// StoreWebMChunk persists incoming WebM audio data for later decoding
+func (p *StreamingAudioProcessor) StoreWebMChunk(webmData []byte) error {
+	if len(webmData) == 0 {
+		return nil
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Accumulate WebM data
-	p.webmBuffer.Write(webmData)
-	if _, err := p.inputFile.Write(webmData); err != nil {
-		return nil, err
+	if _, err := p.webmBuffer.Write(webmData); err != nil {
+		return err
 	}
 
-	// Try to decode accumulated WebM data to PCM
+	if _, err := p.inputFile.Write(webmData); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// DecodeFullWebMToPCM converts the stored WebM data to raw PCM samples
+func (p *StreamingAudioProcessor) DecodeFullWebMToPCM() ([]int16, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.webmBuffer.Len() == 0 {
+		return nil, fmt.Errorf("no webm audio buffered")
+	}
+
+	if p.inputFile != nil {
+		if err := p.inputFile.Sync(); err != nil {
+			return nil, err
+		}
+	}
+
 	pcmData, err := p.decodeWebMToPCM()
 	if err != nil {
-		log.Printf("WebM decode error (expected for incomplete data): %v", err)
-		return nil, nil // Return nil for incomplete data, not an error
+		return nil, err
 	}
 
 	return pcmData, nil
@@ -88,10 +107,6 @@ func (p *StreamingAudioProcessor) ProcessWebMChunk(webmData []byte) ([]int16, er
 
 // decodeWebMToPCM uses FFmpeg to convert WebM to raw PCM data
 func (p *StreamingAudioProcessor) decodeWebMToPCM() ([]int16, error) {
-	if p.webmBuffer.Len() < 8192 { // Wait for sufficient data
-		return nil, fmt.Errorf("insufficient data")
-	}
-
 	// Create temporary output file for PCM
 	pcmFile, err := os.CreateTemp(p.tempDir, "temp_*.pcm")
 	if err != nil {
