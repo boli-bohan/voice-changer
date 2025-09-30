@@ -26,7 +26,7 @@ warnings.filterwarnings("ignore", message=".*deprecated.*", category=Deprecation
 warnings.filterwarnings("ignore", message=".*audioread.*", category=UserWarning)
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -54,20 +54,18 @@ def shift_pitch(input_file: str, output_file: str, pitch_shift_semitones: float 
         if len(audio_data.shape) == 1:
             # Mono audio
             shifted_audio = librosa.effects.pitch_shift(
-                audio_data,
-                sr=sample_rate,
-                n_steps=pitch_shift_semitones
+                audio_data, sr=sample_rate, n_steps=pitch_shift_semitones
             )
         else:
             # Stereo audio - process each channel separately
-            shifted_audio = np.array([
-                librosa.effects.pitch_shift(
-                    audio_data[channel],
-                    sr=sample_rate,
-                    n_steps=pitch_shift_semitones
-                )
-                for channel in range(audio_data.shape[0])
-            ])
+            shifted_audio = np.array(
+                [
+                    librosa.effects.pitch_shift(
+                        audio_data[channel], sr=sample_rate, n_steps=pitch_shift_semitones
+                    )
+                    for channel in range(audio_data.shape[0])
+                ]
+            )
 
         # Ensure output directory exists
         output_path = Path(output_file)
@@ -76,7 +74,11 @@ def shift_pitch(input_file: str, output_file: str, pitch_shift_semitones: float 
         logger.info(f"Saving processed audio to: {output_file}")
 
         # Save the processed audio
-        sf.write(output_file, shifted_audio.T if len(shifted_audio.shape) > 1 else shifted_audio, sample_rate)
+        sf.write(
+            output_file,
+            shifted_audio.T if len(shifted_audio.shape) > 1 else shifted_audio,
+            sample_rate,
+        )
 
         logger.info("Pitch shifting completed successfully")
         return True
@@ -96,7 +98,7 @@ Examples:
   python shift_pitch.py input.wav output.wav
   python shift_pitch.py input.wav output.wav 6.0
   python shift_pitch.py input.wav output.wav -2.0
-        """
+        """,
     )
 
     parser.add_argument("input_file", help="Input audio file path")
@@ -106,7 +108,7 @@ Examples:
         nargs="?",
         type=float,
         default=4.0,
-        help="Pitch shift in semitones (default: 4.0)"
+        help="Pitch shift in semitones (default: 4.0)",
     )
 
     args = parser.parse_args()

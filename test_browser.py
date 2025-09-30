@@ -237,8 +237,12 @@ async def _run_test(config: BrowserTestConfig) -> None:
             await _await_selector(page, ".connection-status.disconnected", timeout=10)
             await _trigger_press_and_hold(page, config.hold_seconds)
             await _await_button_text(page, "Streaming voice… release to stop", timeout=5)
-            await _await_selector(page, ".connection-status.connecting", timeout=config.connect_timeout)
-            await _await_selector(page, ".connection-status.connected", timeout=config.connect_timeout)
+            await _await_selector(
+                page, ".connection-status.connecting", timeout=config.connect_timeout
+            )
+            await _await_selector(
+                page, ".connection-status.connected", timeout=config.connect_timeout
+            )
             await _wait_for_remote_audio(page, config.playback_timeout)
 
             if config.record_output:

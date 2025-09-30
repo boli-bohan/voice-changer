@@ -50,11 +50,31 @@ up:
 		cd frontend && npm run dev 2>&1 | sed "s/^/[FRONTEND] /" \
 	'
 
+up-echo:
+	@echo "Stopping any existing services..."
+	@just down
+	@echo "Starting all services with echo worker (manual mode, no k8s)..."
+	@echo ""
+	@echo "🌐 Services will be available at:"
+	@echo "  • Go API Server: http://127.0.0.1:8000"
+	@echo "  • Echo Worker: http://127.0.0.1:8001"
+	@echo "  • Frontend: http://localhost:5173"
+	@echo ""
+	@echo "Press Ctrl+C to stop all services"
+	@echo ""
+	@bash -c ' \
+		trap "echo \"\" && echo \"Stopping services...\" && just down && exit" INT TERM; \
+		cd api && go run . 2>&1 | sed "s/^/[API] /" & \
+		API_URL=http://127.0.0.1:8000 uv run uvicorn echo:app --reload --host 127.0.0.1 --port 8001 --log-level info 2>&1 | sed "s/^/[ECHO] /" & \
+		cd frontend && npm run dev 2>&1 | sed "s/^/[FRONTEND] /" \
+	'
+
 down:
 	@echo "Stopping all services..."
 	@pkill -f "[g]o run main.go" 2>/dev/null || true
 	@pkill -f "[m]ain.go" 2>/dev/null || true
 	@pkill -f "[u]vicorn voice_changer:app" 2>/dev/null || true
+	@pkill -f "[u]vicorn echo:app" 2>/dev/null || true
 	@pkill -f "[v]oice_changer:app" 2>/dev/null || true
 	@pkill -f "[n]pm run dev" 2>/dev/null || true
 	@pkill -f "[v]ite.*--port 5173" 2>/dev/null || true

@@ -15,22 +15,26 @@ image = (
     # Install system dependencies
     .apt_install("ffmpeg")
     # Install Python dependencies matching pyproject.toml
-    .pip_install([
-        "fastapi>=0.111",
-        "uvicorn>=0.29",
-        "aiortc>=1.7",
-        "av>=11.0",
-        "pylibsrtp>=0.10",
-        "librosa>=0.10",
-        "soundfile>=0.12",
-        "numpy>=1.26",
-        "scipy>=1.11",
-        "python-multipart>=0.0.6",
-        "aiofiles>=23.2",
-        "pydub>=0.25"
-    ])
+    .pip_install(
+        [
+            "fastapi>=0.111",
+            "uvicorn>=0.29",
+            "aiortc>=1.7",
+            "av>=11.0",
+            "pylibsrtp>=0.10",
+            "librosa>=0.10",
+            "soundfile>=0.12",
+            "numpy>=1.26",
+            "scipy>=1.11",
+            "python-multipart>=0.0.6",
+            "aiofiles>=23.2",
+            "pydub>=0.25",
+        ]
+    )
     # Add local source files
-    .add_local_python_source(modal.Mount.from_local_file("voice_changer.py", remote_path="/root/voice_changer.py"))
+    .add_local_python_source(
+        modal.Mount.from_local_file("voice_changer.py", remote_path="/root/voice_changer.py")
+    )
 )
 
 
@@ -41,7 +45,7 @@ image = (
     # Allow longer timeouts for audio processing
     timeout=300,
     # Enable container reuse for better performance
-    container_idle_timeout=240
+    container_idle_timeout=240,
 )
 @modal.asgi_app()
 def fastapi_app():

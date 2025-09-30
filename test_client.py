@@ -14,7 +14,9 @@ from urllib import request
 if "pytest" in sys.modules:  # pragma: no cover - avoids pytest collecting this CLI utility
     import pytest
 
-    pytest.skip("test_client.py is an integration utility, not a pytest module", allow_module_level=True)
+    pytest.skip(
+        "test_client.py is an integration utility, not a pytest module", allow_module_level=True
+    )
 
 import wave
 
@@ -26,7 +28,9 @@ from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaPlayer
 from aiortc.mediastreams import MediaStreamError
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 PCM_SAMPLE_RATE = 48_000
@@ -105,7 +109,9 @@ class VoiceChangerWebRTCTestClient:
         answer = RTCSessionDescription(sdp=response["sdp"], type=response["type"])
         await self.pc.setRemoteDescription(answer)
 
-    async def _record_remote_audio(self, track: MediaStreamTrack, output_path: Path, max_duration: float | None = None) -> int:
+    async def _record_remote_audio(
+        self, track: MediaStreamTrack, output_path: Path, max_duration: float | None = None
+    ) -> int:
         """Collect audio frames from the remote track and persist them to disk.
 
         Args:
@@ -174,7 +180,9 @@ class VoiceChangerWebRTCTestClient:
         logger.info("💾 Wrote %s samples to %s", sample_count, output_path)
         return sample_count
 
-    async def process_audio_file(self, input_file: str, output_file: str, expected_file: str | None = None) -> bool:
+    async def process_audio_file(
+        self, input_file: str, output_file: str, expected_file: str | None = None
+    ) -> bool:
         """Stream an input file through the worker and optionally verify the output.
 
         Args:
@@ -196,7 +204,9 @@ class VoiceChangerWebRTCTestClient:
             frames = wf.getnframes()
             rate = wf.getframerate()
             input_duration = frames / float(rate)
-            logger.info("📏 Input file duration: %.2fs (%d frames at %d Hz)", input_duration, frames, rate)
+            logger.info(
+                "📏 Input file duration: %.2fs (%d frames at %d Hz)", input_duration, frames, rate
+            )
 
         # Add buffer to max duration for pitch shift processing delay
         max_duration = input_duration + 1.0
@@ -350,7 +360,9 @@ class VoiceChangerWebRTCTestClient:
         return success
 
 
-async def run_test(input_file: str, output_file: str, expected_file: str | None, api_base: str) -> bool:
+async def run_test(
+    input_file: str, output_file: str, expected_file: str | None, api_base: str
+) -> bool:
     """Execute the end-to-end test workflow with the provided parameters.
 
     Args:
@@ -373,7 +385,9 @@ app = typer.Typer(help="Voice Changer WebRTC Test Client")
 def main_sync(
     input_file: Path = typer.Argument(Path("data/test_input.wav"), help="Input audio file"),
     output_file: Path = typer.Argument(Path("output.wav"), help="Output audio file"),
-    expected_file: Path | None = typer.Option(Path("data/test_output.wav"), "--expected", "-e", help="Expected output for verification"),
+    expected_file: Path | None = typer.Option(
+        Path("data/test_output.wav"), "--expected", "-e", help="Expected output for verification"
+    ),
     api_base: str = typer.Option("http://localhost:8000", "--api-base", "-a", help="API base URL"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
 ) -> None:
@@ -388,7 +402,14 @@ def main_sync(
     if expected_file:
         typer.echo(f"   ✅ Expected: {expected_file}")
 
-    success = asyncio.run(run_test(str(input_file), str(output_file), str(expected_file) if expected_file else None, api_base))
+    success = asyncio.run(
+        run_test(
+            str(input_file),
+            str(output_file),
+            str(expected_file) if expected_file else None,
+            api_base,
+        )
+    )
 
     if success:
         typer.echo("\n✅ Test completed successfully")

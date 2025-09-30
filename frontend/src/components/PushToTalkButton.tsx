@@ -137,7 +137,9 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
       >
         <div className="button-content">
           <div className="button-icon">
-            {(appState === 'idle' || appState === 'playing') && <div className="microphone-icon">🎤</div>}
+            {(appState === 'idle' || appState === 'playing') && (
+              <div className="microphone-icon">🎤</div>
+            )}
             {appState === 'recording' && <div className="recording-indicator" />}
             {appState === 'error' && <div className="error-icon">❌</div>}
           </div>
@@ -156,8 +158,8 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
 
       <div className="instructions">
         <p>
-          Hold down the button to stream your voice to the worker. Release to stop the WebRTC session and
-          start a new one when you are ready.
+          Hold down the button to stream your voice to the worker. Release to stop the WebRTC
+          session and start a new one when you are ready.
         </p>
       </div>
     </div>

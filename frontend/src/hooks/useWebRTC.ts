@@ -28,7 +28,9 @@ export const useWebRTC = ({
   const peerRef = useRef<RTCPeerConnection | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null)
-  const [connectionState, setConnectionState] = useState<'connecting' | 'connected' | 'disconnected'>('disconnected')
+  const [connectionState, setConnectionState] = useState<
+    'connecting' | 'connected' | 'disconnected'
+  >('disconnected')
   const [isStreaming, setIsStreaming] = useState(false)
 
   /**
@@ -59,7 +61,7 @@ export const useWebRTC = ({
         onRemoteStopped?.()
       }
     },
-    [onRemoteStopped, onStatusChange],
+    [onRemoteStopped, onStatusChange]
   )
 
   useEffect(() => {
@@ -112,7 +114,7 @@ export const useWebRTC = ({
       const answer = await response.json()
       await pc.setRemoteDescription(answer)
     },
-    [apiBaseUrl],
+    [apiBaseUrl]
   )
 
   /**

@@ -48,10 +48,10 @@ var (
 
 // handleRoot responds with a basic service descriptor for observability checks.
 func handleRoot(w http.ResponseWriter, r *http.Request) {
-        response := map[string]interface{}{
-                "service":   "Voice Changer API",
-                "status":    "running",
-                "version":   "2.0.0",
+	response := map[string]interface{}{
+		"service":   "Voice Changer API",
+		"status":    "running",
+		"version":   "2.0.0",
 		"timestamp": time.Now().Format(time.RFC3339),
 	}
 
@@ -65,14 +65,14 @@ func handleHealth(w http.ResponseWriter, r *http.Request) {
 	workerCount := len(workers)
 	workersMux.RUnlock()
 
-        response := map[string]interface{}{
-                "status":        "healthy",
-                "worker_count":  workerCount,
-                "timestamp":     time.Now().Format(time.RFC3339),
+	response := map[string]interface{}{
+		"status":       "healthy",
+		"worker_count": workerCount,
+		"timestamp":    time.Now().Format(time.RFC3339),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-        json.NewEncoder(w).Encode(response)
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleConfig exposes runtime configuration values required by the frontend.
@@ -81,20 +81,20 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 	workerCount := len(workers)
 	workersMux.RUnlock()
 
-        response := map[string]interface{}{
-                "worker_count": workerCount,
-                "load_balancing": "enabled",
-        }
-        w.Header().Set("Content-Type", "application/json")
-        json.NewEncoder(w).Encode(response)
+	response := map[string]interface{}{
+		"worker_count":   workerCount,
+		"load_balancing": "enabled",
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
 }
 
 // forwardOfferToWorker proxies an SDP offer to a specific worker and returns the answer.
 func forwardOfferToWorker(r *http.Request, offer offerRequest, workerURL string) (*offerResponse, int, error) {
-        payload, err := json.Marshal(offer)
-        if err != nil {
-                return nil, http.StatusInternalServerError, fmt.Errorf("failed to encode offer: %w", err)
-        }
+	payload, err := json.Marshal(offer)
+	if err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to encode offer: %w", err)
+	}
 
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, workerURL+"/offer", bytes.NewReader(payload))
 	if err != nil {
@@ -122,7 +122,7 @@ func forwardOfferToWorker(r *http.Request, offer offerRequest, workerURL string)
 		return nil, http.StatusBadGateway, fmt.Errorf("invalid worker response: %w", err)
 	}
 
-        return &answer, http.StatusOK, nil
+	return &answer, http.StatusOK, nil
 }
 
 // selectWorker finds an available worker with the lowest connection count.
@@ -173,8 +173,8 @@ func handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 	workersMux.Unlock()
 
-	log.Printf("💓 Heartbeat from worker %s: %d/%d connections",
-		hb.WorkerID, hb.ConnectionCount, hb.MaxConnections)
+	// log.Printf("💓 Heartbeat from worker %s: %d/%d connections",
+	//	hb.WorkerID, hb.ConnectionCount, hb.MaxConnections)
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -208,10 +208,10 @@ func cleanupStaleWorkers() {
 
 // handleWebRTCOffer accepts incoming offers and relays them to an available worker.
 func handleWebRTCOffer(w http.ResponseWriter, r *http.Request) {
-        var offer offerRequest
-        if err := json.NewDecoder(r.Body).Decode(&offer); err != nil {
-                http.Error(w, "invalid JSON payload", http.StatusBadRequest)
-                return
+	var offer offerRequest
+	if err := json.NewDecoder(r.Body).Decode(&offer); err != nil {
+		http.Error(w, "invalid JSON payload", http.StatusBadRequest)
+		return
 	}
 
 	worker, err := selectWorker()
@@ -232,8 +232,8 @@ func handleWebRTCOffer(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(answer); err != nil {
-                http.Error(w, "failed to encode response", http.StatusInternalServerError)
-        }
+		http.Error(w, "failed to encode response", http.StatusInternalServerError)
+	}
 }
 
 // main wires the HTTP routes, applies CORS, and starts the signalling server.
@@ -241,7 +241,7 @@ func main() {
 	// Start worker cleanup goroutine
 	go cleanupStaleWorkers()
 
-        router := mux.NewRouter()
+	router := mux.NewRouter()
 
 	router.HandleFunc("/", handleRoot).Methods(http.MethodGet)
 	router.HandleFunc("/health", handleHealth).Methods(http.MethodGet)
