@@ -45,13 +45,13 @@ up:
 
 down:
 	@echo "Stopping all services..."
-	@pkill -f "go run main.go" 2>/dev/null || true
-	@pkill -f "main.go" 2>/dev/null || true
-	@pkill -f "uvicorn voice_changer:app" 2>/dev/null || true
-	@pkill -f "voice_changer:app" 2>/dev/null || true
-	@pkill -f "npm run dev" 2>/dev/null || true
-	@pkill -f "vite.*--port 5173" 2>/dev/null || true
-	@pkill -f "vite" 2>/dev/null || true
+	@pkill -f "[g]o run main.go" 2>/dev/null || true
+	@pkill -f "[m]ain.go" 2>/dev/null || true
+	@pkill -f "[u]vicorn voice_changer:app" 2>/dev/null || true
+	@pkill -f "[v]oice_changer:app" 2>/dev/null || true
+	@pkill -f "[n]pm run dev" 2>/dev/null || true
+	@pkill -f "[v]ite.*--port 5173" 2>/dev/null || true
+	@pkill -f "[v]ite" 2>/dev/null || true
 	@lsof -ti:8000 2>/dev/null | xargs -r kill 2>/dev/null || true
 	@lsof -ti:8001 2>/dev/null | xargs -r kill 2>/dev/null || true
 	@lsof -ti:5173 2>/dev/null | xargs -r kill 2>/dev/null || true

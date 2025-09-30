@@ -69,7 +69,7 @@ class PitchShiftTrack(MediaStreamTrack):
             AudioFrame: The processed audio frame ready for streaming.
         """
         frame = await self._source.recv()
-        samples = frame.to_ndarray(format="flt")
+        samples = frame.to_ndarray()
 
         if samples.ndim == 1:
             mono = samples
@@ -90,14 +90,16 @@ class PitchShiftTrack(MediaStreamTrack):
             logger.error("Pitch shifting error: %s", exc)
             shifted = mono
 
-        shifted = np.clip(shifted, -1.0, 1.0).astype(np.float32)
+        shifted = np.clip(shifted, -1.0, 1.0)
 
         if self._channels and self._channels > 1:
             processed = np.tile(shifted, (self._channels, 1))
         else:
             processed = shifted[np.newaxis, :]
 
-        out_frame = AudioFrame.from_ndarray(processed, format="flt")
+        pcm16 = np.clip(processed * 32767.0, -32768, 32767).astype(np.int16)
+
+        out_frame = AudioFrame.from_ndarray(pcm16, format="s16")
         out_frame.sample_rate = frame.sample_rate
         out_frame.pts = frame.pts
         out_frame.time_base = frame.time_base
@@ -169,6 +171,8 @@ async def handle_offer(payload: SDPModel) -> dict[str, str]:
         if pc.connectionState in {"failed", "closed", "disconnected"}:
             await _cleanup_peer(pc)
 
+    track_ready = asyncio.Event()
+
     @pc.on("track")
     async def on_track(track: MediaStreamTrack) -> None:
         """Handle incoming tracks by applying pitch shifting to audio streams."""
@@ -176,6 +180,7 @@ async def handle_offer(payload: SDPModel) -> dict[str, str]:
         if track.kind == "audio":
             transformed = PitchShiftTrack(track)
             pc.addTrack(transformed)
+            track_ready.set()
 
             @track.on("ended")
             async def on_track_ended() -> None:
@@ -187,6 +192,10 @@ async def handle_offer(payload: SDPModel) -> dict[str, str]:
 
     try:
         await pc.setRemoteDescription(offer)
+        try:
+            await asyncio.wait_for(track_ready.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("⚠️ No audio track received before answer generation")
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
         await _wait_for_ice_completion(pc)
