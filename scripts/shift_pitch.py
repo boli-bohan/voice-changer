@@ -31,16 +31,15 @@ logger = logging.getLogger(__name__)
 
 
 def shift_pitch(input_file: str, output_file: str, pitch_shift_semitones: float = 4.0) -> bool:
-    """
-    Apply pitch shifting to an audio file.
+    """Apply a pitch shift to the provided audio file.
 
     Args:
-        input_file: Path to input audio file
-        output_file: Path to output audio file
-        pitch_shift_semitones: Number of semitones to shift pitch
+        input_file (str): Path to the input audio file.
+        output_file (str): Destination path for the processed audio file.
+        pitch_shift_semitones (float): Number of semitones to shift the pitch.
 
     Returns:
-        bool: True if successful, False otherwise
+        bool: ``True`` if processing succeeds, ``False`` otherwise.
     """
     try:
         logger.info(f"Loading audio from: {input_file}")
@@ -88,7 +87,7 @@ def shift_pitch(input_file: str, output_file: str, pitch_shift_semitones: float 
 
 
 def main():
-    """Main function to handle command line arguments and execute pitch shifting."""
+    """Parse CLI arguments and run the pitch shifting workflow."""
     parser = argparse.ArgumentParser(
         description="Apply pitch shifting to audio files",
         formatter_class=argparse.RawDescriptionHelpFormatter,

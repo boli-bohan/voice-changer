@@ -26,6 +26,19 @@ logger = logging.getLogger(__name__)
 
 
 def _post_json(url: str, payload: dict[str, object], timeout: float = 15.0) -> dict[str, object]:
+    """Send a JSON payload via HTTP POST and return the decoded response.
+
+    Args:
+        url (str): Destination URL for the request.
+        payload (dict[str, object]): JSON-serialisable body to send.
+        timeout (float): Timeout in seconds for the HTTP request.
+
+    Returns:
+        dict[str, object]: Parsed JSON response.
+
+    Raises:
+        RuntimeError: If the server responds with an error status code.
+    """
     data = json.dumps(payload).encode("utf-8")
     req = request.Request(url, data=data, headers={"Content-Type": "application/json"})
     with request.urlopen(req, timeout=timeout) as resp:
@@ -36,29 +49,37 @@ def _post_json(url: str, payload: dict[str, object], timeout: float = 15.0) -> d
 
 
 def _ensure_parent(path: Path) -> None:
+    """Create the parent directories for ``path`` if they do not exist."""
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
 @dataclass
 class TestConfig:
+    """Runtime configuration for the WebRTC test harness."""
+
     api_base: str = "http://localhost:8000"
     offer_path: str = "/webrtc/offer"
     wait_after_audio: float = 1.0
 
 
 class VoiceChangerWebRTCTestClient:
+    """WebRTC client used for exercising the Voice Changer worker."""
+
     def __init__(self, config: TestConfig):
+        """Store configuration and initialise placeholders for WebRTC state."""
         self.config = config
         self.pc: Optional[RTCPeerConnection] = None
         self.player: Optional[MediaPlayer] = None
         self.recorder: Optional[MediaRecorder] = None
 
     async def _wait_for_ice(self) -> None:
+        """Wait until ICE gathering for the active peer connection completes."""
         assert self.pc is not None
         while self.pc.iceGatheringState != "complete":
             await asyncio.sleep(0.05)
 
     async def _negotiate(self) -> None:
+        """Negotiate the WebRTC session by exchanging SDP with the signalling API."""
         assert self.pc is not None
         offer = await self.pc.createOffer()
         await self.pc.setLocalDescription(offer)
@@ -76,6 +97,16 @@ class VoiceChangerWebRTCTestClient:
         await self.pc.setRemoteDescription(answer)
 
     async def process_audio_file(self, input_file: str, output_file: str, expected_file: Optional[str] = None) -> bool:
+        """Stream an input file through the worker and optionally verify the output.
+
+        Args:
+            input_file (str): Path to the source audio file to send.
+            output_file (str): Path for recording the transformed audio.
+            expected_file (Optional[str]): Optional reference file for validation.
+
+        Returns:
+            bool: ``True`` when processing (and verification, if requested) succeeds.
+        """
         logger.info("🎧 Starting WebRTC test session")
         input_path = Path(input_file)
         output_path = Path(output_file)
@@ -121,6 +152,15 @@ class VoiceChangerWebRTCTestClient:
 
     @staticmethod
     def verify_output(actual_file: Path, expected_file: Path) -> bool:
+        """Compare the generated audio file to an expected reference file.
+
+        Args:
+            actual_file (Path): Path to the recorded output file.
+            expected_file (Path): Path to the expected reference audio file.
+
+        Returns:
+            bool: ``True`` if the file sizes are within tolerance, otherwise ``False``.
+        """
         if not expected_file.exists():
             logger.warning("⚠️ Expected file not found: %s", expected_file)
             return False
@@ -149,6 +189,17 @@ class VoiceChangerWebRTCTestClient:
 
 
 async def run_test(input_file: str, output_file: str, expected_file: Optional[str], api_base: str) -> bool:
+    """Execute the end-to-end test workflow with the provided parameters.
+
+    Args:
+        input_file (str): Audio file to send through the worker.
+        output_file (str): File path where the transformed audio should be saved.
+        expected_file (Optional[str]): Optional file path for verification.
+        api_base (str): Base URL of the signalling API.
+
+    Returns:
+        bool: ``True`` if processing and optional verification succeed.
+    """
     client = VoiceChangerWebRTCTestClient(TestConfig(api_base=api_base))
     return await client.process_audio_file(input_file, output_file, expected_file)
 
@@ -164,6 +215,7 @@ def main_sync(
     api_base: str = typer.Option("http://localhost:8000", "--api-base", "-a", help="API base URL"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
 ) -> None:
+    """CLI entry point for running an end-to-end worker verification test."""
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 

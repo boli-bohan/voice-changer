@@ -51,12 +51,23 @@ class PitchShiftTrack(MediaStreamTrack):
     kind = "audio"
 
     def __init__(self, source: MediaStreamTrack, pitch_shift_semitones: float = 4.0):
+        """Initialise a processing track that applies a pitch shift.
+
+        Args:
+            source: Incoming audio track from the remote peer.
+            pitch_shift_semitones: Number of semitones to shift the pitch.
+        """
         super().__init__()
         self._source = source
         self._pitch_shift = pitch_shift_semitones
         self._channels: int | None = None
 
     async def recv(self) -> AudioFrame:
+        """Receive an audio frame, shift its pitch, and emit the result.
+
+        Returns:
+            AudioFrame: The processed audio frame ready for streaming.
+        """
         frame = await self._source.recv()
         samples = frame.to_ndarray(format="flt")
 
@@ -97,11 +108,13 @@ active_peers: Set[RTCPeerConnection] = set()
 
 
 async def _wait_for_ice_completion(pc: RTCPeerConnection) -> None:
+    """Poll until ICE gathering completes for the provided connection."""
     while pc.iceGatheringState != "complete":
         await asyncio.sleep(0.05)
 
 
 async def _cleanup_peer(pc: RTCPeerConnection) -> None:
+    """Remove a peer from the active set and close its connection."""
     if pc in active_peers:
         active_peers.remove(pc)
     await pc.close()
@@ -110,11 +123,21 @@ async def _cleanup_peer(pc: RTCPeerConnection) -> None:
 
 @app.get("/")
 async def get_status() -> dict[str, str]:
+    """Return a simple readiness response for health probes.
+
+    Returns:
+        dict[str, str]: Service identifier and status metadata.
+    """
     return {"status": "running", "service": "voice_changer_webrtc_worker", "version": "3.0.0"}
 
 
 @app.get("/health")
 async def health_check() -> dict[str, object]:
+    """Report the current health state and connection metrics.
+
+    Returns:
+        dict[str, object]: Details about service status and active peers.
+    """
     return {
         "status": "healthy",
         "active_peers": len(active_peers),
@@ -126,7 +149,14 @@ async def health_check() -> dict[str, object]:
 
 @app.post("/offer")
 async def handle_offer(payload: SDPModel) -> dict[str, str]:
-    """Accept an SDP offer and return the corresponding answer."""
+    """Accept an SDP offer and return the corresponding answer.
+
+    Args:
+        payload: The SDP model supplied by the signalling API.
+
+    Returns:
+        dict[str, str]: The generated SDP answer describing the worker session.
+    """
 
     pc = RTCPeerConnection()
     active_peers.add(pc)
@@ -134,12 +164,14 @@ async def handle_offer(payload: SDPModel) -> dict[str, str]:
 
     @pc.on("connectionstatechange")
     async def on_connection_state_change() -> None:  # pragma: no cover - relies on network state
+        """Monitor peer state changes and trigger cleanup when disconnected."""
         logger.info("Peer connection state: %s", pc.connectionState)
         if pc.connectionState in {"failed", "closed", "disconnected"}:
             await _cleanup_peer(pc)
 
     @pc.on("track")
     async def on_track(track: MediaStreamTrack) -> None:
+        """Handle incoming tracks by applying pitch shifting to audio streams."""
         logger.info("🎙️ Incoming track: %s", track.kind)
         if track.kind == "audio":
             transformed = PitchShiftTrack(track)
@@ -147,6 +179,7 @@ async def handle_offer(payload: SDPModel) -> dict[str, str]:
 
             @track.on("ended")
             async def on_track_ended() -> None:
+                """Log track completion and dispose of the peer connection."""
                 logger.info("🏁 Audio track ended")
                 await _cleanup_peer(pc)
 
@@ -168,6 +201,7 @@ async def handle_offer(payload: SDPModel) -> dict[str, str]:
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
+    """Ensure all active peer connections are closed during shutdown."""
     await asyncio.gather(*(_cleanup_peer(pc) for pc in list(active_peers)), return_exceptions=True)
 
 

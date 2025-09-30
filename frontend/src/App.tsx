@@ -3,6 +3,14 @@ import PushToTalkButton, { type AppState } from './components/PushToTalkButton'
 import AudioWaveform, { type AudioWaveformMode } from './components/AudioWaveform'
 import './App.css'
 
+/**
+ * Root application component that wires together the push-to-talk workflow.
+ *
+ * Manages WebRTC connection state and maps PushToTalkButton app states to
+ * waveform display modes for the AudioWaveform component.
+ *
+ * @returns The rendered Voice Changer user interface.
+ */
 function App() {
   const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('disconnected')
   const [waveformMode, setWaveformMode] = useState<AudioWaveformMode>('inactive')

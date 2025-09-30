@@ -8,6 +8,16 @@ interface UseWebRTCOptions {
   onRemoteStopped?: () => void
 }
 
+/**
+ * React hook that encapsulates WebRTC signalling and audio streaming logic.
+ *
+ * @param apiBaseUrl - Base URL of the signalling API for SDP exchange.
+ * @param onStatusChange - Callback for connection state updates.
+ * @param onError - Callback invoked when negotiation or playback fails.
+ * @param onRemoteStarted - Optional callback when remote audio begins.
+ * @param onRemoteStopped - Optional callback when remote audio ends.
+ * @returns Controls and status flags for managing a WebRTC session.
+ */
 export const useWebRTC = ({
   apiBaseUrl,
   onStatusChange,
@@ -21,6 +31,11 @@ export const useWebRTC = ({
   const [connectionState, setConnectionState] = useState<'connecting' | 'connected' | 'disconnected'>('disconnected')
   const [isStreaming, setIsStreaming] = useState(false)
 
+  /**
+   * Tears down active WebRTC state and optionally emits disconnect callbacks.
+   *
+   * @param notify - When true, notifies listeners about disconnection.
+   */
   const cleanup = useCallback(
     (notify = true) => {
       peerRef.current?.close()
@@ -51,6 +66,11 @@ export const useWebRTC = ({
     return () => cleanup(false)
   }, [cleanup])
 
+  /**
+   * Waits for ICE candidate gathering to finish before sending an SDP offer.
+   *
+   * @param pc - Peer connection whose ICE gathering state should be awaited.
+   */
   const waitForIceGathering = async (pc: RTCPeerConnection) => {
     if (pc.iceGatheringState === 'complete') return
     await new Promise<void>((resolve) => {
@@ -65,6 +85,11 @@ export const useWebRTC = ({
     })
   }
 
+  /**
+   * Performs offer/answer exchange with the signalling server.
+   *
+   * @param pc - Peer connection to negotiate.
+   */
   const negotiateConnection = useCallback(
     async (pc: RTCPeerConnection) => {
       const offer = await pc.createOffer()
@@ -90,6 +115,9 @@ export const useWebRTC = ({
     [apiBaseUrl],
   )
 
+  /**
+   * Starts microphone capture, negotiates the peer connection, and streams audio.
+   */
   const startStreaming = useCallback(async () => {
     if (peerRef.current) return
 
@@ -160,6 +188,9 @@ export const useWebRTC = ({
     }
   }, [cleanup, negotiateConnection, onError, onRemoteStarted, onStatusChange])
 
+  /**
+   * Stops streaming and cleans up any active peer connection.
+   */
   const stopStreaming = useCallback(() => {
     cleanup()
   }, [cleanup])

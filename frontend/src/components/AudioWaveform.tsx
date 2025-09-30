@@ -16,6 +16,13 @@ const modeCaptions: Record<AudioWaveformMode, string> = {
 
 const BAR_COUNT = 12
 
+/**
+ * Decorative waveform visualization that reflects the current audio state.
+ *
+ * @param mode - Current interaction mode driving animation behaviour.
+ * @param caption - Optional caption overriding the default mode text.
+ * @returns A rendered waveform animation with accompanying caption.
+ */
 const AudioWaveform: React.FC<AudioWaveformProps> = ({ mode, caption }) => {
   return (
     <div className={`audio-waveform mode-${mode}`}>
