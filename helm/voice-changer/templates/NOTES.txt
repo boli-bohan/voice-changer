@@ -1,0 +1,26 @@
+✅ Voice Changer has been deployed!
+
+📊 Check deployment status:
+   kubectl get pods -l app={{ .Values.global.appName }}
+
+{{- if eq .Values.api.service.type "NodePort" }}
+
+🌐 Access URLs (via NodePort):
+   API Server: http://$(minikube ip):{{ .Values.api.service.nodePort }}
+   Worker:     http://$(minikube ip):{{ .Values.worker.service.nodePort }}
+   Frontend:   http://$(minikube ip):{{ .Values.frontend.service.nodePort }}
+{{- end }}
+
+💡 To access via localhost, run port-forwarding in separate terminals:
+   kubectl port-forward svc/{{ include "voice-changer.api.fullname" . }} 9000:{{ .Values.api.service.port }}
+   kubectl port-forward svc/{{ include "voice-changer.worker.fullname" . }} 9001:{{ .Values.worker.service.port }}
+   kubectl port-forward svc/{{ include "voice-changer.frontend.fullname" . }} 3000:{{ .Values.frontend.service.port }}
+
+📝 View logs:
+   kubectl logs -l app={{ .Values.global.appName }} -f
+
+🔄 Upgrade the release:
+   helm upgrade {{ .Release.Name }} helm/voice-changer
+
+🗑️  Uninstall:
+   helm uninstall {{ .Release.Name }}

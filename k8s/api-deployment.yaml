@@ -24,9 +24,6 @@ spec:
         ports:
         - containerPort: 8000
           name: http
-        env:
-        - name: VOICE_WORKER_URL
-          value: "http://voice-changer-worker:8001"
         livenessProbe:
           httpGet:
             path: /health

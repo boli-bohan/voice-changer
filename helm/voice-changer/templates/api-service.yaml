@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "voice-changer.api.fullname" . }}
+  labels:
+    {{- include "voice-changer.api.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.api.service.type }}
+  ports:
+  - port: {{ .Values.api.service.port }}
+    targetPort: {{ .Values.api.service.targetPort }}
+    {{- if eq .Values.api.service.type "NodePort" }}
+    nodePort: {{ .Values.api.service.nodePort }}
+    {{- end }}
+    protocol: TCP
+    name: http
+  selector:
+    {{- include "voice-changer.api.selectorLabels" . | nindent 4 }}

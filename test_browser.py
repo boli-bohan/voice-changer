@@ -13,7 +13,7 @@ from playwright.async_api import BrowserContext, Page, async_playwright
 
 LOGGER = logging.getLogger(__name__)
 DEFAULT_APP_URL = "http://localhost:5173/"
-BROWSER_TEST_INPUT = Path(__file__).parent / "data" / "test_input.webm"
+BROWSER_TEST_INPUT = Path(__file__).parent / "data" / "test_input.wav"
 
 
 @dataclass(slots=True)
