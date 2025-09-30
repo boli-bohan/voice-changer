@@ -19,6 +19,7 @@ dependencies = [
     "pydub>=0.25",
     "modal>=0.64",
     "typer>=0.9",
+    "playwright>=1.44",
 ]
 
 [project.optional-dependencies]

@@ -90,7 +90,11 @@ clean:
 	@echo "Cleanup complete"
 
 test:
-	@echo "Running backend tests..."
-	uv run pytest
-	@echo "Running frontend tests..."
-	cd frontend && npm run test
+        @echo "Running backend tests..."
+        uv run pytest
+        @echo "Running frontend tests..."
+        cd frontend && npm run test
+
+test-browser *args:
+        @echo "Running headless browser integration test..."
+        uv run python test_browser.py {{args}}

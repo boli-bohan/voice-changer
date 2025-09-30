@@ -41,3 +41,11 @@ just up # start frontend, api server, and voice changer worker
 just up # start services
 uv run test_client.py # tests the api with a sample audio file data/test_input.webm
 ```
+
+To exercise the frontend end-to-end flow in a real browser, first install the Playwright
+Chromium binary and then run the automated test while the stack is up:
+
+```
+uv run playwright install chromium
+uv run python test_browser.py --record-output temp_audio/remote.webm
+```
