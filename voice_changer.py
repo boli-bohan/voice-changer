@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import uuid
 
+import httpx
 import librosa
 import numpy as np
 from aiortc import RTCPeerConnection, RTCSessionDescription
@@ -24,6 +27,13 @@ from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+# Worker configuration for heartbeat and load balancing
+WORKER_ID = os.environ.get("HOSTNAME", str(uuid.uuid4()))
+WORKER_URL = f"http://{os.environ.get('POD_IP', '127.0.0.1')}:8001"
+API_URL = os.environ.get("API_URL", "http://voice-changer-api:8000")
+HEARTBEAT_INTERVAL = 5  # seconds
+MAX_CONNECTIONS = 4
 
 app = FastAPI(title="Voice Changer WebRTC Worker", version="3.0.0")
 
@@ -152,6 +162,43 @@ async def _cleanup_peer(pc: RTCPeerConnection) -> None:
     logger.info("🔌 Closed peer connection (%s)", pc)
 
 
+async def heartbeat_loop() -> None:
+    """Periodically send heartbeat to API server with current capacity information.
+
+    This allows the API server to maintain an up-to-date registry of available
+    workers and their connection counts for load balancing.
+    """
+    logger.info("🫀 Starting heartbeat loop to %s (worker_id=%s, worker_url=%s)",
+                API_URL, WORKER_ID, WORKER_URL)
+
+    async with httpx.AsyncClient() as client:
+        while True:
+            try:
+                await client.post(
+                    f"{API_URL}/heartbeat",
+                    json={
+                        "worker_id": WORKER_ID,
+                        "worker_url": WORKER_URL,
+                        "connection_count": len(active_peers),
+                        "max_connections": MAX_CONNECTIONS,
+                    },
+                    timeout=5.0,
+                )
+                logger.debug("💓 Heartbeat sent: %d/%d connections",
+                           len(active_peers), MAX_CONNECTIONS)
+            except Exception as exc:
+                logger.warning("⚠️ Heartbeat failed: %s", exc)
+
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+
+
+@app.on_event("startup")
+async def on_startup() -> None:
+    """Initialize worker and start background tasks on application startup."""
+    asyncio.create_task(heartbeat_loop())
+    logger.info("✅ Worker initialized: id=%s url=%s", WORKER_ID, WORKER_URL)
+
+
 @app.get("/")
 async def get_status() -> dict[str, str]:
     """Return a simple readiness response for health probes.
@@ -175,6 +222,22 @@ async def health_check() -> dict[str, object]:
         "service": "voice_changer_webrtc_worker",
         "version": "3.0.0",
         "capabilities": ["pitch_shifting", "webrtc", "streaming_audio"],
+    }
+
+
+@app.get("/capacity")
+async def get_capacity() -> dict[str, object]:
+    """Return current worker capacity and availability information.
+
+    Returns:
+        dict[str, object]: Worker identification, load, and availability status.
+    """
+    return {
+        "worker_id": WORKER_ID,
+        "worker_url": WORKER_URL,
+        "connection_count": len(active_peers),
+        "max_connections": MAX_CONNECTIONS,
+        "available": len(active_peers) < MAX_CONNECTIONS,
     }
 
 

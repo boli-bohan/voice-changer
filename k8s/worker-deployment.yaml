@@ -6,7 +6,7 @@ metadata:
     app: voice-changer
     component: worker
 spec:
-  replicas: 1
+  replicas: 3
   selector:
     matchLabels:
       app: voice-changer
@@ -27,6 +27,16 @@ spec:
         env:
         - name: PYTHONUNBUFFERED
           value: "1"
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: HOSTNAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: API_URL
+          value: "http://voice-changer-api:8000"
         livenessProbe:
           httpGet:
             path: /health

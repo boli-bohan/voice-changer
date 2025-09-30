@@ -38,8 +38,9 @@ just up # start frontend, api server, and voice changer worker
 ## Testing
 
 ```
+uv sync --all-extras # install additional test dependencies
 just up # start services
-uv run test_client.py # tests the api with a sample audio file data/test_input.webm
+uv run test_client.py # tests the api with a sample audio file data/test_input.wav
 ```
 
 To exercise the frontend end-to-end flow in a real browser, first install the Playwright

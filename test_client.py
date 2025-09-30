@@ -101,8 +101,13 @@ class VoiceChangerWebRTCTestClient:
         answer = RTCSessionDescription(sdp=response["sdp"], type=response["type"])
         await self.pc.setRemoteDescription(answer)
 
-    async def _record_remote_audio(self, track: MediaStreamTrack, output_path: Path) -> int:
+    async def _record_remote_audio(self, track: MediaStreamTrack, output_path: Path, max_duration: float | None = None) -> int:
         """Collect audio frames from the remote track and persist them to disk.
+
+        Args:
+            track: The audio track to record from.
+            output_path: Where to save the recorded audio.
+            max_duration: Maximum duration to record in seconds. If None, record until track ends.
 
         Returns:
             int: The number of PCM samples written to disk. ``0`` indicates that no audio
@@ -113,15 +118,29 @@ class VoiceChangerWebRTCTestClient:
         chunks: list[np.ndarray] = []
         sample_rate: int | None = None
         channels: int | None = None
+        total_samples = 0
+        max_samples = None
 
         try:
             while True:
                 frame = await track.recv()
                 sample_rate = frame.sample_rate or sample_rate
+
+                # Calculate max samples on first frame when we know the sample rate
+                if max_duration is not None and max_samples is None and sample_rate:
+                    max_samples = int(max_duration * sample_rate)
+                    logger.info("🎯 Recording limited to %.2fs (%d samples at %d Hz)", max_duration, max_samples, sample_rate)
+
                 data = frame.to_ndarray()
                 if data.ndim == 1:
                     data = data[np.newaxis, :]
                 channels = data.shape[0]
+
+                # Check if we've reached the duration limit
+                if max_samples is not None and total_samples >= max_samples:
+                    logger.info("⏹️ Reached max duration, stopping recording")
+                    break
+
                 normalised = data.astype(np.float32)
                 if np.issubdtype(data.dtype, np.integer):
                     info = np.iinfo(data.dtype)
@@ -132,7 +151,9 @@ class VoiceChangerWebRTCTestClient:
                     max_abs = float(np.max(np.abs(normalised))) if normalised.size else 1.0
                     if max_abs > 1.0:
                         normalised /= max_abs
+
                 chunks.append(np.copy(normalised))
+                total_samples += normalised.shape[1]
         except MediaStreamError:
             logger.debug("Remote track ended; finalising recording")
         except Exception as exc:
@@ -175,6 +196,16 @@ class VoiceChangerWebRTCTestClient:
         _ensure_parent(output_path)
         logger.debug("Recording output to %s", output_path.resolve())
 
+        # Calculate input duration to limit recording (workaround for MediaPlayer bug)
+        with wave.open(str(input_path), "rb") as wf:
+            frames = wf.getnframes()
+            rate = wf.getframerate()
+            input_duration = frames / float(rate)
+            logger.info("📏 Input file duration: %.2fs (%d frames at %d Hz)", input_duration, frames, rate)
+
+        # Add buffer to max duration for pitch shift processing delay
+        max_duration = input_duration + 1.0
+
         self.pc = RTCPeerConnection()
         self.player = MediaPlayer(str(input_path), format="wav", options={"sample_rate": "48000"})
 
@@ -187,7 +218,7 @@ class VoiceChangerWebRTCTestClient:
                 logger.info("🔁 Remote audio track received")
                 if self.record_task is None:
                     self.record_task = asyncio.create_task(
-                        self._record_remote_audio(track, output_path)
+                        self._record_remote_audio(track, output_path, max_duration)
                     )
 
         self.pc.addTrack(self.player.audio)
@@ -204,6 +235,7 @@ class VoiceChangerWebRTCTestClient:
             self.player.audio.stop()
         if self.pc:
             await self.pc.close()
+
         recorded_samples = 0
         if self.record_task:
             recorded_samples = await self.record_task
