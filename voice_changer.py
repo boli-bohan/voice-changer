@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Set
 
 import librosa
 import numpy as np
@@ -72,23 +71,46 @@ class PitchShiftTrack(MediaStreamTrack):
         samples = frame.to_ndarray()
 
         if samples.ndim == 1:
-            mono = samples
+            data = samples
             channels = 1
         else:
-            # Average channels down to mono for processing.
-            mono = samples.mean(axis=0)
+            # Average multi-channel input down to mono before processing.
+            data = samples.mean(axis=0)
             channels = samples.shape[0]
 
         if self._channels is None:
             self._channels = channels
 
-        try:
-            shifted = librosa.effects.pitch_shift(
-                mono, sr=frame.sample_rate, n_steps=self._pitch_shift
-            )
-        except Exception as exc:  # pragma: no cover - defensive logging
-            logger.error("Pitch shifting error: %s", exc)
+        mono = data.astype(np.float32)
+        if np.issubdtype(samples.dtype, np.integer):
+            info = np.iinfo(samples.dtype)
+            scale = max(abs(info.min), info.max)
+            if scale > 0:
+                mono /= float(scale)
+        else:
+            max_abs = float(np.max(np.abs(mono))) if mono.size else 1.0
+            if max_abs > 1.0:
+                mono /= max_abs
+
+        original_length = mono.shape[0]
+        shifted: np.ndarray
+        if original_length < 2:
             shifted = mono
+        else:
+            n_fft = 1 << (original_length.bit_length() - 1)
+            n_fft = max(2, min(n_fft, 2048))
+            hop_length = max(1, n_fft // 4)
+            try:
+                shifted = librosa.effects.pitch_shift(
+                    mono,
+                    sr=frame.sample_rate,
+                    n_steps=self._pitch_shift,
+                    n_fft=n_fft,
+                    hop_length=hop_length,
+                )
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.error("Pitch shifting error: %s", exc)
+                shifted = mono
 
         shifted = np.clip(shifted, -1.0, 1.0)
 
@@ -97,16 +119,23 @@ class PitchShiftTrack(MediaStreamTrack):
         else:
             processed = shifted[np.newaxis, :]
 
-        pcm16 = np.clip(processed * 32767.0, -32768, 32767).astype(np.int16)
+        pcm = np.clip(processed, -1.0, 1.0)
+        pcm16 = (pcm * 32767.0).astype(np.int16)
 
-        out_frame = AudioFrame.from_ndarray(pcm16, format="s16")
+        layout = None
+        if self._channels == 1:
+            layout = "mono"
+        elif self._channels == 2:
+            layout = "stereo"
+
+        out_frame = AudioFrame.from_ndarray(pcm16, format="s16", layout=layout)
         out_frame.sample_rate = frame.sample_rate
         out_frame.pts = frame.pts
         out_frame.time_base = frame.time_base
         return out_frame
 
 
-active_peers: Set[RTCPeerConnection] = set()
+active_peers: set[RTCPeerConnection] = set()
 
 
 async def _wait_for_ice_completion(pc: RTCPeerConnection) -> None:
@@ -194,7 +223,7 @@ async def handle_offer(payload: SDPModel) -> dict[str, str]:
         await pc.setRemoteDescription(offer)
         try:
             await asyncio.wait_for(track_ready.wait(), timeout=5.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning("⚠️ No audio track received before answer generation")
         answer = await pc.createAnswer()
         await pc.setLocalDescription(answer)
