@@ -1,96 +1,48 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/gorilla/websocket"
 	"github.com/rs/cors"
 )
 
-// Global connection manager
-var connManager = NewConnectionManager()
-
-// WebSocket upgrader
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		origin := r.Header.Get("Origin")
-		return origin == "http://localhost:5173" || origin == "http://127.0.0.1:5173"
-	},
+type offerRequest struct {
+	SDP  string `json:"sdp"`
+	Type string `json:"type"`
 }
 
-// handleWebSocket handles WebSocket connections
-func handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Printf("WebSocket upgrade failed: %v", err)
-		return
-	}
-	defer conn.Close()
-
-	client := connManager.AddConnection(conn)
-	defer connManager.RemoveConnection(client.ID)
-
-	for {
-		messageType, data, err := conn.ReadMessage()
-		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("WebSocket error for %s: %v", client.ID, err)
-			}
-			break
-		}
-
-		if messageType == websocket.TextMessage {
-			var msg Message
-			if err := json.Unmarshal(data, &msg); err != nil {
-				log.Printf("Invalid JSON received from %s", client.ID)
-				sendMessage(client, "error", "Invalid JSON format")
-				continue
-			}
-
-			switch msg.Type {
-			case "start_recording":
-				log.Printf("🎙️ Received start_recording for %s", client.ID)
-				if err := StartRecording(client); err != nil {
-					sendMessage(client, "error", "Failed to start recording")
-				} else {
-					sendMessage(client, "recording_started", "Recording started")
-					log.Printf("✅ Sent recording_started confirmation to %s", client.ID)
-				}
-
-			case "stop_recording":
-				log.Printf("⏹️ Received stop_recording for %s", client.ID)
-				sendMessage(client, "processing_started", "Processing audio...")
-				log.Printf("📤 Sent processing_started message to %s", client.ID)
-
-				if err := StopRecordingAndProcess(client); err != nil {
-					log.Printf("❌ Audio processing failed for %s: %v", client.ID, err)
-					sendMessage(client, "error", "Audio processing failed")
-				} else {
-					log.Printf("✅ Audio processing completed successfully for %s", client.ID)
-				}
-
-			default:
-				log.Printf("Unknown message type: %s", msg.Type)
-			}
-
-		} else if messageType == websocket.BinaryMessage {
-			log.Printf("Received audio chunk for %s: %d bytes", client.ID, len(data))
-			AddAudioChunk(client, data)
-		}
-	}
+type offerResponse struct {
+	SDP  string `json:"sdp"`
+	Type string `json:"type"`
 }
 
-// handleRoot serves the root endpoint with API information
+var (
+	workerURL  string
+	httpClient = &http.Client{Timeout: 15 * time.Second}
+)
+
+func init() {
+	workerURL = os.Getenv("VOICE_WORKER_URL")
+	if workerURL == "" {
+		workerURL = "http://127.0.0.1:8001"
+	}
+	workerURL = strings.TrimRight(workerURL, "/")
+}
+
 func handleRoot(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{
 		"service":   "Voice Changer API",
 		"status":    "running",
-		"version":   "0.1.0",
+		"version":   "2.0.0",
 		"timestamp": time.Now().Format(time.RFC3339),
 	}
 
@@ -98,50 +50,100 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
-// handleHealth serves the health check endpoint
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{
-		"status":             "healthy",
-		"active_connections": connManager.GetConnectionCount(),
-		"temp_directory":     "temp_audio",
-		"timestamp":          time.Now().Format(time.RFC3339),
+		"status":     "healthy",
+		"worker_url": workerURL,
+		"timestamp":  time.Now().Format(time.RFC3339),
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
 
-func main() {
-	// Create temp directory
-	if err := os.MkdirAll("temp_audio", 0755); err != nil {
-		log.Printf("Warning: Failed to create temp_audio directory: %v", err)
+func handleConfig(w http.ResponseWriter, r *http.Request) {
+	response := map[string]string{
+		"worker_url": workerURL,
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func forwardOfferToWorker(r *http.Request, offer offerRequest) (*offerResponse, int, error) {
+	payload, err := json.Marshal(offer)
+	if err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to encode offer: %w", err)
 	}
 
-	// Create router
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, workerURL+"/offer", bytes.NewReader(payload))
+	if err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to create worker request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, http.StatusBadGateway, fmt.Errorf("worker request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, http.StatusBadGateway, fmt.Errorf("failed to read worker response: %w", err)
+	}
+
+	if resp.StatusCode >= 400 {
+		return nil, resp.StatusCode, fmt.Errorf("worker responded with %s: %s", resp.Status, string(body))
+	}
+
+	var answer offerResponse
+	if err := json.Unmarshal(body, &answer); err != nil {
+		return nil, http.StatusBadGateway, fmt.Errorf("invalid worker response: %w", err)
+	}
+
+	return &answer, http.StatusOK, nil
+}
+
+func handleWebRTCOffer(w http.ResponseWriter, r *http.Request) {
+	var offer offerRequest
+	if err := json.NewDecoder(r.Body).Decode(&offer); err != nil {
+		http.Error(w, "invalid JSON payload", http.StatusBadRequest)
+		return
+	}
+
+	answer, status, err := forwardOfferToWorker(r, offer)
+	if err != nil {
+		log.Printf("❌ Failed to forward offer: %v", err)
+		http.Error(w, err.Error(), status)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(answer); err != nil {
+		http.Error(w, "failed to encode response", http.StatusInternalServerError)
+	}
+}
+
+func main() {
 	router := mux.NewRouter()
 
-	// Routes
-	router.HandleFunc("/", handleRoot).Methods("GET")
-	router.HandleFunc("/health", handleHealth).Methods("GET")
-	router.HandleFunc("/ws", handleWebSocket)
+	router.HandleFunc("/", handleRoot).Methods(http.MethodGet)
+	router.HandleFunc("/health", handleHealth).Methods(http.MethodGet)
+	router.HandleFunc("/config", handleConfig).Methods(http.MethodGet)
+	router.HandleFunc("/webrtc/offer", handleWebRTCOffer).Methods(http.MethodPost)
 
-	// CORS configuration
-	c := cors.New(cors.Options{
+	corsHandler := cors.New(cors.Options{
 		AllowedOrigins:   []string{"http://localhost:5173", "http://127.0.0.1:5173"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
 		AllowedHeaders:   []string{"*"},
 		AllowCredentials: true,
-	})
+	}).Handler(router)
 
-	handler := c.Handler(router)
-
-	// Start server
 	log.Println("🚀 Voice Changer API Server starting...")
-	log.Println("📡 Server will be available at http://127.0.0.1:8000")
-	log.Println("🔌 WebSocket endpoint at ws://127.0.0.1:8000/ws")
+	log.Printf("📡 Signalling endpoint at http://127.0.0.1:8000/webrtc/offer -> %s/offer", workerURL)
 	log.Println("⚡ Press Ctrl+C to stop")
 
-	if err := http.ListenAndServe(":8000", handler); err != nil {
+	if err := http.ListenAndServe(":8000", corsHandler); err != nil {
 		log.Fatalf("Server failed to start: %v", err)
 	}
 }

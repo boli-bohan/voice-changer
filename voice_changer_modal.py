@@ -18,7 +18,9 @@ image = (
     .pip_install([
         "fastapi>=0.111",
         "uvicorn>=0.29",
-        "websockets>=12.0",
+        "aiortc>=1.7",
+        "av>=11.0",
+        "pylibsrtp>=0.10",
         "librosa>=0.10",
         "soundfile>=0.12",
         "numpy>=1.26",
@@ -45,7 +47,7 @@ image = (
 def fastapi_app():
     """
     Modal ASGI wrapper that imports and serves the existing FastAPI app.
-    Preserves all endpoints including WebSocket support for real-time audio processing.
+    Preserves the HTTP signalling endpoints and WebRTC streaming support for real-time audio processing.
     """
     # Import the existing FastAPI app from voice_changer.py
     from voice_changer import app as voice_changer_app
