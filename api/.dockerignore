@@ -1,0 +1,18 @@
+# Compiled binaries
+voice-changer-api
+*.exe
+*.test
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md

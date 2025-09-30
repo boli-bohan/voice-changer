@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voice-changer-api
+  labels:
+    app: voice-changer
+    component: api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: voice-changer
+      component: api
+  template:
+    metadata:
+      labels:
+        app: voice-changer
+        component: api
+    spec:
+      containers:
+      - name: api
+        image: voice-changer-api:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8000
+          name: http
+        env:
+        - name: VOICE_WORKER_URL
+          value: "http://voice-changer-worker:8001"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "500m"

@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+*.egg-info/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+*.md
+!README.md
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+
+# API
+api/voice-changer-api
+api/*.exe
+
+# Data and output files
+data/
+output.wav
+*.wav
+*.webm
+*.m4a
+
+# K8s
+k8s/
+
+# Build artifacts
+.ruff_cache/

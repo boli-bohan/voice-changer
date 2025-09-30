@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: voice-changer-worker
+  labels:
+    app: voice-changer
+    component: worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: voice-changer
+      component: worker
+  template:
+    metadata:
+      labels:
+        app: voice-changer
+        component: worker
+    spec:
+      containers:
+      - name: worker
+        image: voice-changer-worker:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 8001
+          name: http
+        env:
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8001
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"

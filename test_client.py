@@ -19,6 +19,8 @@ if "pytest" in sys.modules:  # pragma: no cover - avoids pytest collecting this 
 import wave
 
 import numpy as np
+import torch
+import torchaudio
 import typer
 from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaPlayer
@@ -174,7 +176,7 @@ class VoiceChangerWebRTCTestClient:
         logger.debug("Recording output to %s", output_path.resolve())
 
         self.pc = RTCPeerConnection()
-        self.player = MediaPlayer(str(input_path))
+        self.player = MediaPlayer(str(input_path), format="wav", options={"sample_rate": "48000"})
 
         if not self.player.audio:
             raise RuntimeError("Input file does not contain an audio track")
@@ -241,22 +243,76 @@ class VoiceChangerWebRTCTestClient:
             logger.error("❌ Output file missing: %s", actual_file)
             return False
 
+        # File size sanity check
         actual_size = os.path.getsize(actual_file)
         expected_size = os.path.getsize(expected_file)
-        diff_pct = abs(actual_size - expected_size) / max(expected_size, 1) * 100
+        size_diff_pct = abs(actual_size - expected_size) / max(expected_size, 1) * 100
 
         logger.info(
-            "🔍 Output comparison: actual=%s bytes expected=%s bytes diff=%.1f%%",
+            "🔍 File size comparison: actual=%s bytes expected=%s bytes diff=%.1f%%",
             actual_size,
             expected_size,
-            diff_pct,
+            size_diff_pct,
         )
 
-        success = diff_pct <= 15
+        if size_diff_pct > 15:
+            logger.error("💥 File size difference exceeds 15%% threshold")
+            return False
+
+        # Load audio files with torchaudio for waveform comparison
+        try:
+            actual_waveform, actual_sr = torchaudio.load(str(actual_file))
+            expected_waveform, expected_sr = torchaudio.load(str(expected_file))
+        except Exception as exc:
+            logger.error("❌ Failed to load audio files: %s", exc)
+            return False
+
+        if actual_sr != expected_sr:
+            logger.warning("⚠️ Sample rates differ: actual=%d Hz expected=%d Hz", actual_sr, expected_sr)
+            # Resample actual to match expected
+            resampler = torchaudio.transforms.Resample(orig_freq=actual_sr, new_freq=expected_sr)
+            actual_waveform = resampler(actual_waveform)
+
+        # Ensure both waveforms have the same number of channels
+        if actual_waveform.shape[0] != expected_waveform.shape[0]:
+            logger.warning(
+                "⚠️ Channel counts differ: actual=%d expected=%d",
+                actual_waveform.shape[0],
+                expected_waveform.shape[0],
+            )
+
+        # Align lengths by trimming or padding to the shorter length
+        min_length = min(actual_waveform.shape[1], expected_waveform.shape[1])
+        actual_aligned = actual_waveform[:, :min_length]
+        expected_aligned = expected_waveform[:, :min_length]
+
+        # Compute Mean Squared Error (MSE)
+        mse = torch.mean((actual_aligned - expected_aligned) ** 2).item()
+
+        # Compute correlation coefficient
+        actual_flat = actual_aligned.flatten()
+        expected_flat = expected_aligned.flatten()
+        correlation = torch.corrcoef(torch.stack([actual_flat, expected_flat]))[0, 1].item()
+
+        logger.info("🔊 Audio comparison: MSE=%.6f correlation=%.4f", mse, correlation)
+
+        # Define thresholds for passing
+        # MSE should be low (similar waveforms), correlation should be high (>0.9)
+        mse_threshold = 0.01  # Adjust based on expected noise/variation
+        correlation_threshold = 0.90
+
+        success = mse < mse_threshold and correlation > correlation_threshold
+
         if success:
-            logger.info("🎉 Verification passed")
+            logger.info("🎉 Verification passed (size + audio similarity)")
         else:
-            logger.error("💥 Verification failed")
+            logger.error(
+                "💥 Verification failed: MSE=%.6f (threshold=%.6f), correlation=%.4f (threshold=%.4f)",
+                mse,
+                mse_threshold,
+                correlation,
+                correlation_threshold,
+            )
         return success
 
 
@@ -281,9 +337,9 @@ app = typer.Typer(help="Voice Changer WebRTC Test Client")
 
 @app.command()
 def main_sync(
-    input_file: Path = typer.Argument(Path("data/test_input.webm"), help="Input audio file"),
+    input_file: Path = typer.Argument(Path("data/test_input.wav"), help="Input audio file"),
     output_file: Path = typer.Argument(Path("output.wav"), help="Output audio file"),
-    expected_file: Path | None = typer.Option(None, "--expected", "-e", help="Expected output for verification"),
+    expected_file: Path | None = typer.Option(Path("data/test_output.wav"), "--expected", "-e", help="Expected output for verification"),
     api_base: str = typer.Option("http://localhost:8000", "--api-base", "-a", help="API base URL"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
 ) -> None:

@@ -5,28 +5,37 @@ description = "Real-time voice changing app with push-to-talk functionality"
 authors = [{ name = "Voice Changer Team" }]
 requires-python = ">=3.11"
 dependencies = [
+    # Core FastAPI dependencies
     "fastapi>=0.111",
     "uvicorn>=0.29",
+    # WebRTC dependencies
     "aiortc>=1.7",
     "av>=11.0",
     "pylibsrtp>=0.10",
+    # Audio processing dependencies
     "librosa>=0.10",
     "soundfile>=0.12",
     "numpy>=1.26",
     "scipy>=1.11",
-    "python-multipart>=0.0.6",
-    "aiofiles>=23.2",
-    "pydub>=0.25",
-    "modal>=0.64",
-    "typer>=0.9",
-    "playwright>=1.44",
 ]
 
 [project.optional-dependencies]
 dev = [
+    # Linting and testing
     "ruff>=0.1.14",
     "pytest>=7.4",
     "pytest-asyncio>=0.21",
+    # Test client dependencies (heavy ML libs)
+    "typer>=0.9",
+    "torch>=2.0",
+    "torchaudio>=2.0",
+    # Browser testing
+    "playwright>=1.44",
+    # Optional utilities (not needed for core worker)
+    "python-multipart>=0.0.6",
+    "aiofiles>=23.2",
+    "pydub>=0.25",
+    "modal>=0.64",
 ]
 
 [build-system]
