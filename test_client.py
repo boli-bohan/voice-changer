@@ -120,7 +120,17 @@ class VoiceChangerWebRTCTestClient:
                 if data.ndim == 1:
                     data = data[np.newaxis, :]
                 channels = data.shape[0]
-                chunks.append(np.copy(data))
+                normalised = data.astype(np.float32)
+                if np.issubdtype(data.dtype, np.integer):
+                    info = np.iinfo(data.dtype)
+                    scale = max(abs(info.min), info.max)
+                    if scale:
+                        normalised /= float(scale)
+                else:
+                    max_abs = float(np.max(np.abs(normalised))) if normalised.size else 1.0
+                    if max_abs > 1.0:
+                        normalised /= max_abs
+                chunks.append(np.copy(normalised))
         except MediaStreamError:
             logger.debug("Remote track ended; finalising recording")
         except Exception as exc:
