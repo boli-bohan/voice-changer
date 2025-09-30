@@ -90,8 +90,8 @@ class PitchShiftTrack(MediaStreamTrack):
         """Receive an audio frame, shift its pitch, and emit the result."""
         frame = await self._source.recv()
 
-        # Get audio data as int16 PCM (WebRTC's native format)
-        samples = frame.to_ndarray(format="s16")
+        # Get audio data as int16 PCM (WebRTC's native format for s16 frames)
+        samples = frame.to_ndarray()
 
         # Convert stereo to mono if needed (take first channel)
         if samples.ndim == 2:

@@ -46,12 +46,8 @@ up:
 	@bash -c ' \
 		trap "echo \"\" && echo \"Stopping services...\" && just down && exit" INT TERM; \
 		cd api && go run . 2>&1 | sed "s/^/[API] /" & \
-		API_PID=$$!; \
 		API_URL=http://127.0.0.1:8000 uv run uvicorn voice_changer:app --reload --host 127.0.0.1 --port 8001 --log-level info 2>&1 | sed "s/^/[WORKER] /" & \
-		WORKER_PID=$$!; \
-		cd frontend && npm run dev 2>&1 | sed "s/^/[FRONTEND] /" & \
-		FRONTEND_PID=$$!; \
-		wait $${API_PID} $${WORKER_PID} $${FRONTEND_PID}; \
+		cd frontend && npm run dev 2>&1 | sed "s/^/[FRONTEND] /" \
 	'
 
 down:

@@ -133,7 +133,7 @@ class VoiceChangerWebRTCTestClient:
         try:
             while True:
                 frame = await track.recv()
-                data = frame.to_ndarray(format="s16")
+                data = frame.to_ndarray()
                 if data.ndim == 2:
                     data = data[0]
 
