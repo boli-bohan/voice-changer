@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "voice-changer.api.fullname" . }}
+  labels:
+    {{- include "voice-changer.api.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.api.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "voice-changer.api.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "voice-changer.api.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+      - name: {{ .Values.api.name }}
+        image: "{{ .Values.api.image.repository }}:{{ .Values.api.image.tag }}"
+        imagePullPolicy: {{ .Values.api.image.pullPolicy }}
+        ports:
+        - containerPort: {{ .Values.api.service.targetPort }}
+          name: http
+        livenessProbe:
+          httpGet:
+            path: {{ .Values.api.livenessProbe.httpGet.path }}
+            port: {{ .Values.api.livenessProbe.httpGet.port }}
+          initialDelaySeconds: {{ .Values.api.livenessProbe.initialDelaySeconds }}
+          periodSeconds: {{ .Values.api.livenessProbe.periodSeconds }}
+        readinessProbe:
+          httpGet:
+            path: {{ .Values.api.readinessProbe.httpGet.path }}
+            port: {{ .Values.api.readinessProbe.httpGet.port }}
+          initialDelaySeconds: {{ .Values.api.readinessProbe.initialDelaySeconds }}
+          periodSeconds: {{ .Values.api.readinessProbe.periodSeconds }}
+        resources:
+          {{- toYaml .Values.api.resources | nindent 10 }}

@@ -14,6 +14,7 @@ import asyncio
 import logging
 import os
 import uuid
+from contextlib import asynccontextmanager
 
 import httpx
 import librosa
@@ -35,7 +36,18 @@ API_URL = os.environ.get("API_URL", "http://voice-changer-api:8000")
 HEARTBEAT_INTERVAL = 5  # seconds
 MAX_CONNECTIONS = 4
 
-app = FastAPI(title="Voice Changer WebRTC Worker", version="3.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize worker and start background tasks on application startup."""
+    asyncio.create_task(heartbeat_loop())
+    logger.info("✅ Worker initialized: id=%s url=%s", WORKER_ID, WORKER_URL)
+    yield
+    # Shutdown: ensure all active peer connections are closed
+    await asyncio.gather(*(_cleanup_peer(pc) for pc in list(active_peers)), return_exceptions=True)
+
+
+app = FastAPI(title="Voice Changer WebRTC Worker", version="3.0.0", lifespan=lifespan)
 
 # Allow local development hosts to negotiate directly with the worker.
 app.add_middleware(
@@ -54,6 +66,10 @@ class SDPModel(BaseModel):
     type: str
 
 
+TARGET_SAMPLE_RATE = 48_000
+TARGET_CHANNELS = 1
+
+
 class PitchShiftTrack(MediaStreamTrack):
     """Wraps an audio track and applies a pitch shift to each frame."""
 
@@ -69,41 +85,24 @@ class PitchShiftTrack(MediaStreamTrack):
         super().__init__()
         self._source = source
         self._pitch_shift = pitch_shift_semitones
-        self._channels: int | None = None
 
     async def recv(self) -> AudioFrame:
-        """Receive an audio frame, shift its pitch, and emit the result.
-
-        Returns:
-            AudioFrame: The processed audio frame ready for streaming.
-        """
+        """Receive an audio frame, shift its pitch, and emit the result."""
         frame = await self._source.recv()
-        samples = frame.to_ndarray()
 
-        if samples.ndim == 1:
-            data = samples
-            channels = 1
+        # Get audio data as int16 PCM (WebRTC's native format)
+        samples = frame.to_ndarray(format="s16")
+
+        # Convert stereo to mono if needed (take first channel)
+        if samples.ndim == 2:
+            mono = samples[0].astype(np.float32)
         else:
-            # Average multi-channel input down to mono before processing.
-            data = samples.mean(axis=0)
-            channels = samples.shape[0]
+            mono = samples.astype(np.float32)
 
-        if self._channels is None:
-            self._channels = channels
-
-        mono = data.astype(np.float32)
-        if np.issubdtype(samples.dtype, np.integer):
-            info = np.iinfo(samples.dtype)
-            scale = max(abs(info.min), info.max)
-            if scale > 0:
-                mono /= float(scale)
-        else:
-            max_abs = float(np.max(np.abs(mono))) if mono.size else 1.0
-            if max_abs > 1.0:
-                mono /= max_abs
+        # Normalize int16 range [-32768, 32767] to float [-1.0, 1.0]
+        mono /= 32767.0
 
         original_length = mono.shape[0]
-        shifted: np.ndarray
         if original_length < 2:
             shifted = mono
         else:
@@ -113,7 +112,7 @@ class PitchShiftTrack(MediaStreamTrack):
             try:
                 shifted = librosa.effects.pitch_shift(
                     mono,
-                    sr=frame.sample_rate,
+                    sr=TARGET_SAMPLE_RATE,
                     n_steps=self._pitch_shift,
                     n_fft=n_fft,
                     hop_length=hop_length,
@@ -122,24 +121,12 @@ class PitchShiftTrack(MediaStreamTrack):
                 logger.error("Pitch shifting error: %s", exc)
                 shifted = mono
 
-        shifted = np.clip(shifted, -1.0, 1.0)
-
-        if self._channels and self._channels > 1:
-            processed = np.tile(shifted, (self._channels, 1))
-        else:
-            processed = shifted[np.newaxis, :]
-
-        pcm = np.clip(processed, -1.0, 1.0)
+        pcm = np.clip(shifted, -1.0, 1.0)
         pcm16 = (pcm * 32767.0).astype(np.int16)
+        processed = pcm16[np.newaxis, :]
 
-        layout = None
-        if self._channels == 1:
-            layout = "mono"
-        elif self._channels == 2:
-            layout = "stereo"
-
-        out_frame = AudioFrame.from_ndarray(pcm16, format="s16", layout=layout)
-        out_frame.sample_rate = frame.sample_rate
+        out_frame = AudioFrame.from_ndarray(processed, format="s16", layout="mono")
+        out_frame.sample_rate = TARGET_SAMPLE_RATE
         out_frame.pts = frame.pts
         out_frame.time_base = frame.time_base
         return out_frame
@@ -185,18 +172,11 @@ async def heartbeat_loop() -> None:
                     timeout=5.0,
                 )
                 logger.debug("💓 Heartbeat sent: %d/%d connections",
-                           len(active_peers), MAX_CONNECTIONS)
+                             len(active_peers), MAX_CONNECTIONS)
             except Exception as exc:
                 logger.warning("⚠️ Heartbeat failed: %s", exc)
 
             await asyncio.sleep(HEARTBEAT_INTERVAL)
-
-
-@app.on_event("startup")
-async def on_startup() -> None:
-    """Initialize worker and start background tasks on application startup."""
-    asyncio.create_task(heartbeat_loop())
-    logger.info("✅ Worker initialized: id=%s url=%s", WORKER_ID, WORKER_URL)
 
 
 @app.get("/")
@@ -298,12 +278,6 @@ async def handle_offer(payload: SDPModel) -> dict[str, str]:
     logger.info("✅ Generated SDP answer")
     assert pc.localDescription is not None
     return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
-
-
-@app.on_event("shutdown")
-async def on_shutdown() -> None:
-    """Ensure all active peer connections are closed during shutdown."""
-    await asyncio.gather(*(_cleanup_peer(pc) for pc in list(active_peers)), return_exceptions=True)
 
 
 if __name__ == "__main__":

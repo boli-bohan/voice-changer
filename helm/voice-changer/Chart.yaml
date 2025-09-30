@@ -1,0 +1,13 @@
+apiVersion: v2
+name: voice-changer
+description: Real-time voice changer with push-to-talk functionality using WebRTC streaming
+type: application
+version: 0.1.0
+appVersion: "1.0"
+keywords:
+  - voice-changer
+  - webrtc
+  - audio-processing
+  - real-time
+maintainers:
+  - name: voice-changer-team

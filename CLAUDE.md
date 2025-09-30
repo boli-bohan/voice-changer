@@ -25,12 +25,20 @@ Frontend (React) <--WebRTC SDP--> API Server (Go:8000) <--HTTP--> Worker (Python
 
 ## Common Commands
 
-### Development
+### Local Development (No Kubernetes)
 ```bash
 just install    # Install all dependencies (Go, Python via uv, Node)
-just up         # Start all services (API:8000, Worker:8001, Frontend:5173)
+just up         # Start all services locally (API:8000, Worker:8001, Frontend:5173)
 just down       # Stop all services
 just status     # Check which services are running
+```
+
+### Kubernetes Deployment
+```bash
+just k8s        # Deploy to minikube (API:30900, Worker:30901, Frontend:30000)
+just k8s-down   # Delete kubernetes resources
+just k8s-status # Check deployment status
+just k8s-logs   # View logs from all pods
 ```
 
 ### Individual Services

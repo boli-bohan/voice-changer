@@ -29,6 +29,10 @@ from aiortc.mediastreams import MediaStreamError
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+PCM_SAMPLE_RATE = 48_000
+PCM_CHANNELS = 1
+PCM_WIDTH = 2  # bytes for int16 PCM
+
 
 def _post_json(url: str, payload: dict[str, object], timeout: float = 15.0) -> dict[str, object]:
     """Send a JSON payload via HTTP POST and return the decoded response.
@@ -116,44 +120,35 @@ class VoiceChangerWebRTCTestClient:
         """
 
         chunks: list[np.ndarray] = []
-        sample_rate: int | None = None
-        channels: int | None = None
         total_samples = 0
-        max_samples = None
+        max_samples = int(max_duration * PCM_SAMPLE_RATE) if max_duration else None
+        if max_samples is not None:
+            logger.info(
+                "🎯 Recording limited to %.2fs (%d samples at %d Hz)",
+                max_duration,
+                max_samples,
+                PCM_SAMPLE_RATE,
+            )
 
         try:
             while True:
                 frame = await track.recv()
-                sample_rate = frame.sample_rate or sample_rate
+                data = frame.to_ndarray(format="s16")
+                if data.ndim == 2:
+                    data = data[0]
 
-                # Calculate max samples on first frame when we know the sample rate
-                if max_duration is not None and max_samples is None and sample_rate:
-                    max_samples = int(max_duration * sample_rate)
-                    logger.info("🎯 Recording limited to %.2fs (%d samples at %d Hz)", max_duration, max_samples, sample_rate)
+                if max_samples is not None:
+                    remaining = max_samples - total_samples
+                    if remaining <= 0:
+                        logger.info("⏹️ Reached max duration, stopping recording")
+                        break
+                    if data.shape[0] > remaining:
+                        data = data[:remaining]
 
-                data = frame.to_ndarray()
-                if data.ndim == 1:
-                    data = data[np.newaxis, :]
-                channels = data.shape[0]
-
-                # Check if we've reached the duration limit
-                if max_samples is not None and total_samples >= max_samples:
-                    logger.info("⏹️ Reached max duration, stopping recording")
-                    break
-
-                normalised = data.astype(np.float32)
-                if np.issubdtype(data.dtype, np.integer):
-                    info = np.iinfo(data.dtype)
-                    scale = max(abs(info.min), info.max)
-                    if scale:
-                        normalised /= float(scale)
-                else:
-                    max_abs = float(np.max(np.abs(normalised))) if normalised.size else 1.0
-                    if max_abs > 1.0:
-                        normalised /= max_abs
+                normalised = data.astype(np.float32) / 32767.0
 
                 chunks.append(np.copy(normalised))
-                total_samples += normalised.shape[1]
+                total_samples += normalised.shape[0]
         except MediaStreamError:
             logger.debug("Remote track ended; finalising recording")
         except Exception as exc:
@@ -164,18 +159,18 @@ class VoiceChangerWebRTCTestClient:
             logger.error("❌ No audio samples received; nothing written to %s", output_path)
             return 0
 
-        samples = np.concatenate(chunks, axis=1)
+        samples = np.concatenate(chunks)
         pcm = np.clip(samples, -1.0, 1.0)
         pcm16 = (pcm * 32767).astype(np.int16)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with wave.open(str(output_path), "wb") as wf:
-            wf.setnchannels(channels or 1)
-            wf.setsampwidth(2)
-            wf.setframerate(sample_rate or 48000)
-            wf.writeframes(pcm16.T.tobytes())
+            wf.setnchannels(PCM_CHANNELS)
+            wf.setsampwidth(PCM_WIDTH)
+            wf.setframerate(PCM_SAMPLE_RATE)
+            wf.writeframes(pcm16.tobytes())
 
-        sample_count = int(pcm16.shape[1])
+        sample_count = int(pcm16.shape[0])
         logger.info("💾 Wrote %s samples to %s", sample_count, output_path)
         return sample_count
 
@@ -207,7 +202,11 @@ class VoiceChangerWebRTCTestClient:
         max_duration = input_duration + 1.0
 
         self.pc = RTCPeerConnection()
-        self.player = MediaPlayer(str(input_path), format="wav", options={"sample_rate": "48000"})
+        self.player = MediaPlayer(
+            str(input_path),
+            format="wav",
+            options={"sample_rate": str(PCM_SAMPLE_RATE)},
+        )
 
         if not self.player.audio:
             raise RuntimeError("Input file does not contain an audio track")
@@ -299,21 +298,24 @@ class VoiceChangerWebRTCTestClient:
             logger.error("❌ Failed to load audio files: %s", exc)
             return False
 
-        if actual_sr != expected_sr:
-            logger.warning("⚠️ Sample rates differ: actual=%d Hz expected=%d Hz", actual_sr, expected_sr)
-            # Resample actual to match expected
-            resampler = torchaudio.transforms.Resample(orig_freq=actual_sr, new_freq=expected_sr)
-            actual_waveform = resampler(actual_waveform)
+        if actual_sr != PCM_SAMPLE_RATE or expected_sr != PCM_SAMPLE_RATE:
+            logger.error(
+                "💥 Sample rate mismatch: actual=%d Hz expected=%d Hz (required=%d Hz)",
+                actual_sr,
+                expected_sr,
+                PCM_SAMPLE_RATE,
+            )
+            return False
 
-        # Ensure both waveforms have the same number of channels
-        if actual_waveform.shape[0] != expected_waveform.shape[0]:
-            logger.warning(
-                "⚠️ Channel counts differ: actual=%d expected=%d",
+        if actual_waveform.shape[0] != PCM_CHANNELS or expected_waveform.shape[0] != PCM_CHANNELS:
+            logger.error(
+                "💥 Channel mismatch: actual=%d expected=%d (required=%d)",
                 actual_waveform.shape[0],
                 expected_waveform.shape[0],
+                PCM_CHANNELS,
             )
+            return False
 
-        # Align lengths by trimming or padding to the shorter length
         min_length = min(actual_waveform.shape[1], expected_waveform.shape[1])
         actual_aligned = actual_waveform[:, :min_length]
         expected_aligned = expected_waveform[:, :min_length]
