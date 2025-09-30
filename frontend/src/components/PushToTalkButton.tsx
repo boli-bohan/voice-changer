@@ -1,6 +1,5 @@
-import { useState, useCallback, useEffect } from 'react'
-import { useWebSocket } from '../hooks/useWebSocket'
-import { useAudioRecorder } from '../hooks/useAudioRecorder'
+import { useCallback, useEffect, useState } from 'react'
+import { useWebRTC } from '../hooks/useWebRTC'
 import './PushToTalkButton.css'
 
 interface PushToTalkButtonProps {
@@ -8,7 +7,7 @@ interface PushToTalkButtonProps {
   onAppStateChange?: (state: AppState) => void
 }
 
-export type AppState = 'idle' | 'recording' | 'processing' | 'playing' | 'error'
+export type AppState = 'idle' | 'recording' | 'playing' | 'error'
 
 const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
   onConnectionStatusChange,
@@ -17,37 +16,18 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
   const [appState, setAppState] = useState<AppState>('idle')
   const [errorMessage, setErrorMessage] = useState<string>('')
 
-  const {
-    sendAudioData,
-    connect,
-    disconnect,
-    connectionState,
-    startRecording: startWebSocketRecording,
-    stopRecording: stopWebSocketRecording,
-  } = useWebSocket({
-    url: 'ws://localhost:8000/ws',
+  const { startStreaming, stopStreaming, connectionState, isStreaming } = useWebRTC({
+    apiBaseUrl: 'http://localhost:8000',
     onStatusChange: onConnectionStatusChange,
     onError: useCallback((error: string) => {
       setAppState('error')
       setErrorMessage(error)
     }, []),
-    onPlaybackStarted: useCallback(() => {
+    onRemoteStarted: useCallback(() => {
       setAppState('playing')
     }, []),
-    onPlaybackComplete: useCallback(() => {
+    onRemoteStopped: useCallback(() => {
       setAppState('idle')
-    }, []),
-  })
-
-  const {
-    startRecording: startAudioRecording,
-    stopRecording: stopAudioRecording,
-    isRecording,
-  } = useAudioRecorder({
-    onAudioData: sendAudioData,
-    onError: useCallback((error: string) => {
-      setAppState('error')
-      setErrorMessage(error)
     }, []),
   })
 
@@ -59,72 +39,58 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
     if (appState !== 'idle') return
 
     try {
-      if (connectionState !== 'connected') {
-        await connect()
-      }
       setErrorMessage('')
       setAppState('recording')
-
-      // Start WebSocket recording session
-      startWebSocketRecording()
-
-      // Start audio recording
-      await startAudioRecording()
+      await startStreaming()
     } catch (error) {
       setAppState('error')
-      setErrorMessage(error instanceof Error ? error.message : 'Failed to start recording')
+      setErrorMessage(error instanceof Error ? error.message : 'Failed to start streaming')
     }
-  }, [appState, connectionState, connect, startWebSocketRecording, startAudioRecording])
+  }, [appState, startStreaming])
+
+  const stopSession = useCallback(() => {
+    stopStreaming()
+  }, [stopStreaming])
 
   const handleMouseUp = useCallback(() => {
-    if (appState === 'recording') {
-      setAppState('processing')
-
-      // Stop audio recording
-      stopAudioRecording()
-
-      // Stop WebSocket recording session and trigger processing
-      stopWebSocketRecording()
+    if (isStreaming || appState === 'playing' || appState === 'recording') {
+      stopSession()
     }
-  }, [appState, stopAudioRecording, stopWebSocketRecording])
+  }, [appState, isStreaming, stopSession])
 
   const handleMouseLeave = useCallback(() => {
-    if (appState === 'recording') {
-      setAppState('processing')
-
-      // Stop audio recording
-      stopAudioRecording()
-
-      // Stop WebSocket recording session and trigger processing
-      stopWebSocketRecording()
+    if (isStreaming || appState === 'recording') {
+      stopSession()
     }
-  }, [appState, stopAudioRecording, stopWebSocketRecording])
+  }, [appState, isStreaming, stopSession])
 
   const handleReset = useCallback(() => {
     setAppState('idle')
     setErrorMessage('')
-    disconnect()
-  }, [disconnect])
+    stopStreaming()
+  }, [stopStreaming])
 
   const getButtonText = () => {
     switch (appState) {
       case 'idle':
-        return 'Press & Hold to Record'
+        return connectionState === 'connected' ? 'Press & Hold to Speak' : 'Press to Connect'
       case 'recording':
-        return 'Recording... (Release to Process)'
-      case 'processing':
-        return 'Processing Audio...'
+        return 'Streaming voice… release to stop'
       case 'playing':
-        return 'Playing Processed Audio...'
+        return 'Listening to transformed audio…'
       case 'error':
-        return 'Error Occurred'
+        return 'Error occurred'
       default:
-        return 'Press & Hold to Record'
+        return 'Press & Hold to Speak'
     }
   }
 
   const getButtonClass = () => {
-    return `push-to-talk-button ${appState} ${isRecording ? 'recording' : ''}`
+    const states = [appState]
+    if (isStreaming) {
+      states.push('recording')
+    }
+    return `push-to-talk-button ${states.join(' ')}`
   }
 
   return (
@@ -134,16 +100,13 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
         onMouseDown={handleMouseDown}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseLeave}
-        disabled={appState === 'processing' || appState === 'playing'}
+        disabled={appState === 'error'}
         type="button"
       >
         <div className="button-content">
           <div className="button-icon">
+            {(appState === 'idle' || appState === 'playing') && <div className="microphone-icon">🎤</div>}
             {appState === 'recording' && <div className="recording-indicator" />}
-            {appState === 'processing' && <div className="processing-spinner" />}
-            {(appState === 'idle' || appState === 'playing') && (
-              <div className="microphone-icon">🎤</div>
-            )}
             {appState === 'error' && <div className="error-icon">❌</div>}
           </div>
           <div className="button-text">{getButtonText()}</div>
@@ -161,7 +124,8 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
 
       <div className="instructions">
         <p>
-          Hold down the button to record your voice, then release to hear it with a pitch shift!
+          Hold down the button to stream your voice to the worker. Release to stop the WebRTC session and
+          start a new one when you are ready.
         </p>
       </div>
     </div>

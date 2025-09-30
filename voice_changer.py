@@ -1,178 +1,178 @@
 #!/usr/bin/env python3
 """
-Voice Changer PCM Worker Service - Raw PCM Audio Processing
-Simplified FastAPI WebSocket server for real-time pitch shifting on raw PCM data.
+Voice Changer Worker Service powered by WebRTC streaming.
+
+This service accepts WebRTC peer connections, applies a pitch shift to
+incoming audio in real time, and streams the transformed audio back to the
+client. The HTTP API exposes an SDP offer endpoint that can be used by a
+signalling service (the Go API) to negotiate connections.
 """
 
-import json
+from __future__ import annotations
+
+import asyncio
 import logging
+from typing import Set
+
 import librosa
 import numpy as np
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc.mediastreams import MediaStreamTrack
+from av import AudioFrame
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-# Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Voice Changer PCM Worker", version="2.0.0")
+app = FastAPI(title="Voice Changer WebRTC Worker", version="3.0.0")
+
+# Allow local development hosts to negotiate directly with the worker.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-class PCMAudioProcessor:
-    """Real-time streaming audio processor for raw PCM data."""
+class SDPModel(BaseModel):
+    """Pydantic model representing a WebRTC SDP payload."""
 
-    def __init__(self, pitch_shift_semitones: float = 4.0, sample_rate: int = 44100):
-        self.pitch_shift_semitones = pitch_shift_semitones
-        self.sample_rate = sample_rate
+    sdp: str
+    type: str
 
-        # Buffer for accumulating PCM samples
-        self.pcm_buffer: list[float] = []
-        self.min_chunk_size = int(sample_rate * 0.1)  # 100ms worth of samples
 
-    def add_pcm_samples(self, pcm_data: bytes) -> np.ndarray | None:
-        """
-        Add raw PCM samples and return processed audio if enough data is available.
+class PitchShiftTrack(MediaStreamTrack):
+    """Wraps an audio track and applies a pitch shift to each frame."""
 
-        Args:
-            pcm_data: Raw PCM data as bytes (32-bit float little endian)
+    kind = "audio"
 
-        Returns:
-            Processed audio samples as numpy array, or None if not enough data
-        """
-        float_samples = np.frombuffer(pcm_data, dtype=np.float32)
-        self.pcm_buffer.extend(float_samples.tolist())
+    def __init__(self, source: MediaStreamTrack, pitch_shift_semitones: float = 4.0):
+        super().__init__()
+        self._source = source
+        self._pitch_shift = pitch_shift_semitones
+        self._channels: int | None = None
 
-        # Process if we have enough samples
-        if len(self.pcm_buffer) >= self.min_chunk_size:
-            # Extract chunk for processing
-            chunk = np.array(self.pcm_buffer[: self.min_chunk_size], dtype=np.float32)
-            self.pcm_buffer = self.pcm_buffer[self.min_chunk_size :]
+    async def recv(self) -> AudioFrame:
+        frame = await self._source.recv()
+        samples = frame.to_ndarray(format="flt")
 
-            # Apply pitch shifting
-            try:
-                processed_chunk = librosa.effects.pitch_shift(
-                    chunk, sr=self.sample_rate, n_steps=self.pitch_shift_semitones
-                )
-                return processed_chunk
-            except Exception as e:
-                logger.error(f"Pitch shifting error: {e}")
-                return chunk  # Return original on error
+        if samples.ndim == 1:
+            mono = samples
+            channels = 1
+        else:
+            # Average channels down to mono for processing.
+            mono = samples.mean(axis=0)
+            channels = samples.shape[0]
 
-        return None
+        if self._channels is None:
+            self._channels = channels
 
-    def flush_remaining(self) -> np.ndarray | None:
-        """Process any remaining samples in the buffer."""
-        if len(self.pcm_buffer) > 0:
-            chunk = np.array(self.pcm_buffer, dtype=np.float32)
-            self.pcm_buffer.clear()
+        try:
+            shifted = librosa.effects.pitch_shift(
+                mono, sr=frame.sample_rate, n_steps=self._pitch_shift
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.error("Pitch shifting error: %s", exc)
+            shifted = mono
 
-            try:
-                processed_chunk = librosa.effects.pitch_shift(
-                    chunk, sr=self.sample_rate, n_steps=self.pitch_shift_semitones
-                )
-                return processed_chunk
-            except Exception as e:
-                logger.error(f"Final pitch shifting error: {e}")
-                return chunk
+        shifted = np.clip(shifted, -1.0, 1.0).astype(np.float32)
 
-        return None
+        if self._channels and self._channels > 1:
+            processed = np.tile(shifted, (self._channels, 1))
+        else:
+            processed = shifted[np.newaxis, :]
 
-    def numpy_to_pcm_bytes(self, audio_data: np.ndarray) -> bytes:
-        """Convert numpy audio data back to PCM float32 bytes."""
-        audio_data = np.clip(audio_data, -1.0, 1.0).astype(np.float32)
-        return audio_data.tobytes()
+        out_frame = AudioFrame.from_ndarray(processed, format="flt")
+        out_frame.sample_rate = frame.sample_rate
+        out_frame.pts = frame.pts
+        out_frame.time_base = frame.time_base
+        return out_frame
+
+
+active_peers: Set[RTCPeerConnection] = set()
+
+
+async def _wait_for_ice_completion(pc: RTCPeerConnection) -> None:
+    while pc.iceGatheringState != "complete":
+        await asyncio.sleep(0.05)
+
+
+async def _cleanup_peer(pc: RTCPeerConnection) -> None:
+    if pc in active_peers:
+        active_peers.remove(pc)
+    await pc.close()
+    logger.info("🔌 Closed peer connection (%s)", pc)
 
 
 @app.get("/")
-async def get_status():
-    """Health check endpoint."""
-    return {"status": "Voice Changer PCM Worker is running", "version": "2.0.0"}
+async def get_status() -> dict[str, str]:
+    return {"status": "running", "service": "voice_changer_webrtc_worker", "version": "3.0.0"}
 
 
 @app.get("/health")
-async def health_check():
-    """Detailed health check."""
+async def health_check() -> dict[str, object]:
     return {
         "status": "healthy",
-        "service": "voice_changer_pcm_worker",
-        "version": "2.0.0",
-        "capabilities": ["pitch_shifting", "real_time_pcm_processing", "raw_audio"],
+        "active_peers": len(active_peers),
+        "service": "voice_changer_webrtc_worker",
+        "version": "3.0.0",
+        "capabilities": ["pitch_shifting", "webrtc", "streaming_audio"],
     }
 
 
-@app.websocket("/process")
-async def websocket_pcm_processor(websocket: WebSocket):
-    """WebSocket endpoint for real-time PCM voice processing."""
-    await websocket.accept()
+@app.post("/offer")
+async def handle_offer(payload: SDPModel) -> dict[str, str]:
+    """Accept an SDP offer and return the corresponding answer."""
 
-    # Initialize processor for this connection
-    processor = PCMAudioProcessor(pitch_shift_semitones=4.0)
+    pc = RTCPeerConnection()
+    active_peers.add(pc)
+    logger.info("📡 Received new WebRTC offer; active peers: %d", len(active_peers))
 
-    logger.info("🔊 Voice changer PCM worker: New processing connection established")
+    @pc.on("connectionstatechange")
+    async def on_connection_state_change() -> None:  # pragma: no cover - relies on network state
+        logger.info("Peer connection state: %s", pc.connectionState)
+        if pc.connectionState in {"failed", "closed", "disconnected"}:
+            await _cleanup_peer(pc)
+
+    @pc.on("track")
+    async def on_track(track: MediaStreamTrack) -> None:
+        logger.info("🎙️ Incoming track: %s", track.kind)
+        if track.kind == "audio":
+            transformed = PitchShiftTrack(track)
+            pc.addTrack(transformed)
+
+            @track.on("ended")
+            async def on_track_ended() -> None:
+                logger.info("🏁 Audio track ended")
+                await _cleanup_peer(pc)
+
+    offer = RTCSessionDescription(sdp=payload.sdp, type=payload.type)
 
     try:
-        while True:
-            # Receive data from Go API server
-            data = await websocket.receive()
+        await pc.setRemoteDescription(offer)
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+        await _wait_for_ice_completion(pc)
+    except Exception as exc:  # pragma: no cover - network failure handling
+        await _cleanup_peer(pc)
+        raise HTTPException(status_code=500, detail=f"Failed to process SDP offer: {exc}")
 
-            if "text" in data:
-                # Handle control messages
-                try:
-                    message = json.loads(data["text"])
-                    message_type = message.get("type")
+    logger.info("✅ Generated SDP answer")
+    assert pc.localDescription is not None
+    return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
 
-                    if message_type == "flush":
-                        logger.info("🔄 Received flush command, processing remaining audio")
 
-                        # Process any remaining audio
-                        final_chunk = processor.flush_remaining()
-                        if final_chunk is not None:
-                            pcm_bytes = processor.numpy_to_pcm_bytes(final_chunk)
-                            await websocket.send_bytes(pcm_bytes)
-
-                        # Send done message
-                        await websocket.send_text(
-                            json.dumps({"type": "done", "message": "PCM processing completed"})
-                        )
-                        logger.info("✅ Sent done message, PCM processing completed")
-                        # Break out of the loop after sending done message
-                        break
-
-                    elif message_type == "config":
-                        # Update processing configuration
-                        pitch_shift = message.get("pitch_shift", 4.0)
-                        processor.pitch_shift_semitones = pitch_shift
-                        logger.info(f"🎛️ Updated pitch shift to {pitch_shift} semitones")
-
-                        await websocket.send_text(
-                            json.dumps({"type": "config_updated", "pitch_shift": pitch_shift})
-                        )
-
-                except json.JSONDecodeError:
-                    logger.error("Invalid JSON received")
-
-            elif "bytes" in data:
-                # Handle raw PCM data
-                pcm_data = data["bytes"]
-                logger.info("🎵 Received PCM chunk: %d bytes", len(pcm_data))
-
-                # Process the PCM data
-                processed_chunk = processor.add_pcm_samples(pcm_data)
-
-                if processed_chunk is not None:
-                    # Convert back to PCM bytes and send
-                    pcm_bytes = processor.numpy_to_pcm_bytes(processed_chunk)
-                    await websocket.send_bytes(pcm_bytes)
-                    logger.info("📤 Sent processed PCM chunk: %d bytes", len(pcm_bytes))
-
-    except WebSocketDisconnect:
-        logger.info("🔌 Voice changer PCM worker: Connection disconnected")
-    except Exception as e:
-        logger.error(f"❌ Voice changer PCM worker error: {str(e)}")
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    await asyncio.gather(*(_cleanup_peer(pc) for pc in list(active_peers)), return_exceptions=True)
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    # For development/testing
-    logger.info("🚀 Starting Voice Changer PCM Worker Service")
-    uvicorn.run("voice_changer_pcm:app", host="127.0.0.1", port=8001, log_level="info", reload=True)
+    logger.info("🚀 Starting Voice Changer WebRTC Worker Service")
+    uvicorn.run("voice_changer:app", host="127.0.0.1", port=8001, log_level="info")

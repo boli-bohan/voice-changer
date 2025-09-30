@@ -49,7 +49,8 @@ function App() {
 
       <footer className="app-footer">
         <small>
-          Backend service: <span id="backend-url">ws://localhost:8000/ws</span>
+          Signalling via <span id="backend-url">http://localhost:8000/webrtc/offer</span> · Direct WebRTC to
+          worker on <span id="worker-url">http://localhost:8001</span>
         </small>
       </footer>
     </div>
