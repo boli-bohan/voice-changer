@@ -17,9 +17,13 @@ if "pytest" in sys.modules:  # pragma: no cover - avoids pytest collecting this 
 
     pytest.skip("test_client.py is an integration utility, not a pytest module", allow_module_level=True)
 
+import wave
+
+import numpy as np
 import typer
-from aiortc import RTCPeerConnection, RTCSessionDescription
-from aiortc.contrib.media import MediaPlayer, MediaRecorder
+from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
+from aiortc.contrib.media import MediaPlayer
+from aiortc.mediastreams import MediaStreamError
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -51,7 +55,7 @@ class VoiceChangerWebRTCTestClient:
         self.config = config
         self.pc: Optional[RTCPeerConnection] = None
         self.player: Optional[MediaPlayer] = None
-        self.recorder: Optional[MediaRecorder] = None
+        self.record_task: Optional[asyncio.Task[None]] = None
 
     async def _wait_for_ice(self) -> None:
         assert self.pc is not None
@@ -75,15 +79,54 @@ class VoiceChangerWebRTCTestClient:
         answer = RTCSessionDescription(sdp=response["sdp"], type=response["type"])
         await self.pc.setRemoteDescription(answer)
 
+    async def _record_remote_audio(self, track: MediaStreamTrack, output_path: Path) -> None:
+        """Collect audio frames from the remote track and persist them to disk."""
+
+        chunks: list[np.ndarray] = []
+        sample_rate: Optional[int] = None
+        channels: Optional[int] = None
+
+        try:
+            while True:
+                frame = await track.recv()
+                sample_rate = frame.sample_rate or sample_rate
+                data = frame.to_ndarray()
+                if data.ndim == 1:
+                    data = data[np.newaxis, :]
+                channels = data.shape[0]
+                chunks.append(np.copy(data))
+        except MediaStreamError:
+            logger.debug("Remote track ended; finalising recording")
+        except Exception as exc:
+            logger.error("Failed to record remote audio: %s", exc)
+            return
+
+        if not chunks:
+            logger.error("❌ No audio samples received; nothing written to %s", output_path)
+            return
+
+        samples = np.concatenate(chunks, axis=1)
+        pcm = np.clip(samples, -1.0, 1.0)
+        pcm16 = (pcm * 32767).astype(np.int16)
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(output_path), "wb") as wf:
+            wf.setnchannels(channels or 1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate or 48000)
+            wf.writeframes(pcm16.T.tobytes())
+
+        logger.info("💾 Wrote %s samples to %s", pcm16.shape[1], output_path)
+
     async def process_audio_file(self, input_file: str, output_file: str, expected_file: Optional[str] = None) -> bool:
         logger.info("🎧 Starting WebRTC test session")
         input_path = Path(input_file)
         output_path = Path(output_file)
         _ensure_parent(output_path)
+        logger.debug("Recording output to %s", output_path.resolve())
 
         self.pc = RTCPeerConnection()
         self.player = MediaPlayer(str(input_path))
-        self.recorder = MediaRecorder(str(output_path))
 
         if not self.player.audio:
             raise RuntimeError("Input file does not contain an audio track")
@@ -92,9 +135,10 @@ class VoiceChangerWebRTCTestClient:
         async def on_track(track):
             if track.kind == "audio":
                 logger.info("🔁 Remote audio track received")
-                assert self.recorder is not None
-                self.recorder.addTrack(track)
-                await self.recorder.start()
+                if self.record_task is None:
+                    self.record_task = asyncio.create_task(
+                        self._record_remote_audio(track, output_path)
+                    )
 
         self.pc.addTrack(self.player.audio)
 
@@ -105,19 +149,25 @@ class VoiceChangerWebRTCTestClient:
 
         await asyncio.sleep(self.config.wait_after_audio)
 
-        if self.recorder:
-            await self.recorder.stop()
-        if self.player:
-            await self.player.stop()
+        if self.player and self.player.audio:
+            # MediaPlayer in aiortc doesn't expose an async stop(), so stop the audio track directly.
+            self.player.audio.stop()
         if self.pc:
             await self.pc.close()
+        if self.record_task:
+            await self.record_task
 
         logger.info("✅ Audio captured to %s", output_path)
 
         if expected_file:
             return self.verify_output(output_path, Path(expected_file))
 
-        return output_path.exists()
+        exists = output_path.exists()
+        if exists:
+            logger.info("📦 Output file available (%s bytes)", os.path.getsize(output_path))
+        else:
+            logger.error("❌ Output file was not created")
+        return exists
 
     @staticmethod
     def verify_output(actual_file: Path, expected_file: Path) -> bool:
