@@ -9,7 +9,6 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 from urllib import request
 
 if "pytest" in sys.modules:  # pragma: no cover - avoids pytest collecting this CLI utility
@@ -72,9 +71,9 @@ class VoiceChangerWebRTCTestClient:
     def __init__(self, config: TestConfig):
         """Store configuration and initialise placeholders for WebRTC state."""
         self.config = config
-        self.pc: Optional[RTCPeerConnection] = None
-        self.player: Optional[MediaPlayer] = None
-        self.record_task: Optional[asyncio.Task[None]] = None
+        self.pc: RTCPeerConnection | None = None
+        self.player: MediaPlayer | None = None
+        self.record_task: asyncio.Task[int] | None = None
 
     async def _wait_for_ice(self) -> None:
         """Wait until ICE gathering for the active peer connection completes."""
@@ -100,12 +99,18 @@ class VoiceChangerWebRTCTestClient:
         answer = RTCSessionDescription(sdp=response["sdp"], type=response["type"])
         await self.pc.setRemoteDescription(answer)
 
-    async def _record_remote_audio(self, track: MediaStreamTrack, output_path: Path) -> None:
-        """Collect audio frames from the remote track and persist them to disk."""
+    async def _record_remote_audio(self, track: MediaStreamTrack, output_path: Path) -> int:
+        """Collect audio frames from the remote track and persist them to disk.
+
+        Returns:
+            int: The number of PCM samples written to disk. ``0`` indicates that no audio
+            was captured, either because the track never produced data or an error
+            occurred while recording.
+        """
 
         chunks: list[np.ndarray] = []
-        sample_rate: Optional[int] = None
-        channels: Optional[int] = None
+        sample_rate: int | None = None
+        channels: int | None = None
 
         try:
             while True:
@@ -120,11 +125,11 @@ class VoiceChangerWebRTCTestClient:
             logger.debug("Remote track ended; finalising recording")
         except Exception as exc:
             logger.error("Failed to record remote audio: %s", exc)
-            return
+            return 0
 
         if not chunks:
             logger.error("❌ No audio samples received; nothing written to %s", output_path)
-            return
+            return 0
 
         samples = np.concatenate(chunks, axis=1)
         pcm = np.clip(samples, -1.0, 1.0)
@@ -137,15 +142,17 @@ class VoiceChangerWebRTCTestClient:
             wf.setframerate(sample_rate or 48000)
             wf.writeframes(pcm16.T.tobytes())
 
-        logger.info("💾 Wrote %s samples to %s", pcm16.shape[1], output_path)
+        sample_count = int(pcm16.shape[1])
+        logger.info("💾 Wrote %s samples to %s", sample_count, output_path)
+        return sample_count
 
-    async def process_audio_file(self, input_file: str, output_file: str, expected_file: Optional[str] = None) -> bool:
+    async def process_audio_file(self, input_file: str, output_file: str, expected_file: str | None = None) -> bool:
         """Stream an input file through the worker and optionally verify the output.
 
         Args:
             input_file (str): Path to the source audio file to send.
             output_file (str): Path for recording the transformed audio.
-            expected_file (Optional[str]): Optional reference file for validation.
+            expected_file (str | None): Optional reference file for validation.
 
         Returns:
             bool: ``True`` when processing (and verification, if requested) succeeds.
@@ -185,15 +192,20 @@ class VoiceChangerWebRTCTestClient:
             self.player.audio.stop()
         if self.pc:
             await self.pc.close()
+        recorded_samples = 0
         if self.record_task:
-            await self.record_task
+            recorded_samples = await self.record_task
+            self.record_task = None
 
-        logger.info("✅ Audio captured to %s", output_path)
+        if recorded_samples > 0:
+            logger.info("✅ Audio captured to %s", output_path)
+        else:
+            logger.error("❌ Audio capture failed for %s", output_path)
 
         if expected_file:
             return self.verify_output(output_path, Path(expected_file))
 
-        exists = output_path.exists()
+        exists = output_path.exists() and recorded_samples > 0
         if exists:
             logger.info("📦 Output file available (%s bytes)", os.path.getsize(output_path))
         else:
@@ -238,13 +250,13 @@ class VoiceChangerWebRTCTestClient:
         return success
 
 
-async def run_test(input_file: str, output_file: str, expected_file: Optional[str], api_base: str) -> bool:
+async def run_test(input_file: str, output_file: str, expected_file: str | None, api_base: str) -> bool:
     """Execute the end-to-end test workflow with the provided parameters.
 
     Args:
         input_file (str): Audio file to send through the worker.
         output_file (str): File path where the transformed audio should be saved.
-        expected_file (Optional[str]): Optional file path for verification.
+        expected_file (str | None): Optional file path for verification.
         api_base (str): Base URL of the signalling API.
 
     Returns:
@@ -261,7 +273,7 @@ app = typer.Typer(help="Voice Changer WebRTC Test Client")
 def main_sync(
     input_file: Path = typer.Argument(Path("data/test_input.webm"), help="Input audio file"),
     output_file: Path = typer.Argument(Path("output.wav"), help="Output audio file"),
-    expected_file: Optional[Path] = typer.Option(None, "--expected", "-e", help="Expected output for verification"),
+    expected_file: Path | None = typer.Option(None, "--expected", "-e", help="Expected output for verification"),
     api_base: str = typer.Option("http://localhost:8000", "--api-base", "-a", help="API base URL"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
 ) -> None:
