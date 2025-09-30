@@ -9,6 +9,13 @@ interface PushToTalkButtonProps {
 
 export type AppState = 'idle' | 'recording' | 'playing' | 'error'
 
+/**
+ * Microphone-style push-to-talk control that orchestrates WebRTC streaming.
+ *
+ * @param onConnectionStatusChange - Callback invoked when the worker connection state changes.
+ * @param onAppStateChange - Optional callback for exposing application state transitions.
+ * @returns A button element with streaming status and error messaging.
+ */
 const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
   onConnectionStatusChange,
   onAppStateChange,
@@ -35,6 +42,9 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
     onAppStateChange?.(appState)
   }, [appState, onAppStateChange])
 
+  /**
+   * Initiates audio capture and WebRTC negotiation when the button is pressed.
+   */
   const handleMouseDown = useCallback(async () => {
     if (appState !== 'idle') return
 
@@ -48,28 +58,45 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
     }
   }, [appState, startStreaming])
 
+  /**
+   * Stops the active WebRTC session and releases associated resources.
+   */
   const stopSession = useCallback(() => {
     stopStreaming()
   }, [stopStreaming])
 
+  /**
+   * Ends streaming when the button is released if a session is active.
+   */
   const handleMouseUp = useCallback(() => {
     if (isStreaming || appState === 'playing' || appState === 'recording') {
       stopSession()
     }
   }, [appState, isStreaming, stopSession])
 
+  /**
+   * Ensures streaming stops if the pointer leaves the button mid-press.
+   */
   const handleMouseLeave = useCallback(() => {
     if (isStreaming || appState === 'recording') {
       stopSession()
     }
   }, [appState, isStreaming, stopSession])
 
+  /**
+   * Clears error state and resets the component to idle.
+   */
   const handleReset = useCallback(() => {
     setAppState('idle')
     setErrorMessage('')
     stopStreaming()
   }, [stopStreaming])
 
+  /**
+   * Computes the button label based on application and connection state.
+   *
+   * @returns A descriptive label for the current interaction state.
+   */
   const getButtonText = () => {
     switch (appState) {
       case 'idle':
@@ -85,6 +112,11 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
     }
   }
 
+  /**
+   * Builds the CSS class list describing the current button state.
+   *
+   * @returns Space-separated CSS class names for styling.
+   */
   const getButtonClass = () => {
     const states = [appState]
     if (isStreaming) {

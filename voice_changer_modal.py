@@ -45,9 +45,10 @@ image = (
 )
 @modal.asgi_app()
 def fastapi_app():
-    """
-    Modal ASGI wrapper that imports and serves the existing FastAPI app.
-    Preserves the HTTP signalling endpoints and WebRTC streaming support for real-time audio processing.
+    """Create the ASGI application served by Modal.
+
+    Returns:
+        FastAPI: The Voice Changer application defined in ``voice_changer.py``.
     """
     # Import the existing FastAPI app from voice_changer.py
     from voice_changer import app as voice_changer_app
@@ -57,7 +58,7 @@ def fastapi_app():
 
 @app.local_entrypoint()
 def main():
-    """Local entrypoint for testing and development."""
+    """Provide a helpful message when running the Modal app locally."""
     print("🚀 Voice Changer Modal App")
     print("Use 'modal serve voice_changer_modal.py' to run locally")
     print("Use 'modal deploy voice_changer_modal.py' to deploy to production")
