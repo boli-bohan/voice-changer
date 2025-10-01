@@ -44,6 +44,8 @@ api:
     initialDelaySeconds: 5
     periodSeconds: 5
 
+  nodeAffinity: {}
+
 # Worker configuration
 worker:
   name: worker
@@ -87,6 +89,8 @@ worker:
     initialDelaySeconds: 5
     periodSeconds: 5
 
+  nodeAffinity: {}
+
 # Frontend configuration
 frontend:
   name: frontend
@@ -124,6 +128,8 @@ frontend:
       port: 80
     initialDelaySeconds: 5
     periodSeconds: 5
+
+  nodeAffinity: {}
 
 # TURN server configuration
 turn:
@@ -163,6 +169,7 @@ turn:
       existingSecret: ""
 
   resources: {}
+  nodeAffinity: {}
   nodeSelector: {}
   tolerations: []
   affinity: {}

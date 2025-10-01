@@ -81,3 +81,52 @@ API so that browsers add the relay to their ICE server list:
 After these changes, only the TURN LoadBalancer requires a public IP; worker
 pods remain on internal networking while still being reachable to end users
 through the relay.
+
+## Schedule components onto public or private nodes
+
+When running the chart on kind or any environment with differentiated nodes,
+use the new `nodeAffinity` values to target specific node labels. For example,
+pin the API and TURN pods to nodes labeled `topology=public` while keeping the
+workers on nodes labeled `topology=private`:
+
+```yaml
+api:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: topology
+              operator: In
+              values: [public]
+
+turn:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: topology
+              operator: In
+              values: [public]
+
+worker:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: topology
+              operator: In
+              values: [private]
+
+frontend:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: topology
+              operator: In
+              values: [public]
+```
+
+Any valid Kubernetes `nodeAffinity` structure is supported, so you can mix
+`preferredDuringSchedulingIgnoredDuringExecution` blocks or multiple
+`nodeSelectorTerms` as needed for your environment.

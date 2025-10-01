@@ -14,6 +14,11 @@ spec:
       labels:
         {{- include "voice-changer.frontend.selectorLabels" . | nindent 8 }}
     spec:
+      {{- with .Values.frontend.nodeAffinity }}
+      affinity:
+        nodeAffinity:
+        {{- toYaml . | nindent 10 }}
+      {{- end }}
       containers:
       - name: {{ .Values.frontend.name }}
         image: "{{ .Values.frontend.image.repository }}:{{ .Values.frontend.image.tag }}"

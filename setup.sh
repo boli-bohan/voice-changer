@@ -89,6 +89,25 @@ install_minikube() {
     chmod +x "${BIN_DIR}/minikube"
 }
 
+install_kind() {
+    if command -v kind >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local version
+    version="${KIND_VERSION:-latest}"
+    if [[ "${version}" == "latest" ]]; then
+        version=$(curl -fsSL https://api.github.com/repos/kubernetes-sigs/kind/releases/latest \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["tag_name"])')
+    fi
+
+    local url
+    url="https://kind.sigs.k8s.io/dl/${version}/kind-linux-amd64"
+
+    curl -fsSLo "${BIN_DIR}/kind" "${url}"
+    chmod +x "${BIN_DIR}/kind"
+}
+
 install_helm() {
     if command -v helm >/dev/null 2>&1; then
         return 0
@@ -247,6 +266,7 @@ USAGE
     install_python_dependencies
     install_kubectl
     install_minikube
+    install_kind
     install_helm
     install_just
 
@@ -261,6 +281,9 @@ Ensure your Docker daemon is running and that the following directory is on your
 
 To start Minikube against the local Docker daemon:
   minikube start --driver=docker
+
+Create a kind cluster with a public control-plane node and private workers:
+  kind create cluster --config k8s/kind-public-private.yaml
 
 Build Kubernetes images, install the Helm chart, and run the regression client:
   ./scripts/build-images.sh
