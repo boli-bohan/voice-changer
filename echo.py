@@ -15,7 +15,7 @@ from aiortc.mediastreams import MediaStreamTrack
 from av import AudioFrame
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -34,7 +34,11 @@ MAX_CONNECTIONS = 4
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize worker and start background tasks on application startup."""
+    """Initialize worker and start background tasks on application startup.
+
+    Args:
+        app: FastAPI application instance managed by the lifespan context.
+    """
     asyncio.create_task(heartbeat_loop())
     logger.info("✅ Echo worker initialized: id=%s url=%s", WORKER_ID, WORKER_URL)
     yield
@@ -55,8 +59,8 @@ app.add_middleware(
 class SDPModel(BaseModel):
     """Pydantic model representing a WebRTC SDP payload."""
 
-    sdp: str
-    type: str
+    sdp: str = Field(description="Session description protocol body provided by the browser.")
+    type: str = Field(description="SDP type such as 'offer' or 'answer'.")
 
 
 class EchoTrack(MediaStreamTrack):
@@ -65,11 +69,20 @@ class EchoTrack(MediaStreamTrack):
     kind = "audio"
 
     def __init__(self, source: MediaStreamTrack):
+        """Initialize an echo track that proxies frames from the source.
+
+        Args:
+            source: Upstream media track whose audio should be forwarded.
+        """
         super().__init__()
         self._source = source
 
     async def recv(self) -> AudioFrame:  # type: ignore[override]
-        """Return the next frame received from the source without modification."""
+        """Return the next frame received from the source without modification.
+
+        Returns:
+            Audio frame sourced directly from the upstream track.
+        """
 
         return await self._source.recv()
 
@@ -78,11 +91,21 @@ active_peers: set[RTCPeerConnection] = set()
 
 
 async def _wait_for_ice_completion(pc: RTCPeerConnection) -> None:
+    """Wait until ICE gathering completes for a peer connection.
+
+    Args:
+        pc: Connection to monitor for ICE completion.
+    """
     while pc.iceGatheringState != "complete":
         await asyncio.sleep(0.05)
 
 
 async def _cleanup_peer(pc: RTCPeerConnection) -> None:
+    """Remove the peer from the active set and close the connection.
+
+    Args:
+        pc: Connection that should be closed and deregistered.
+    """
     if pc in active_peers:
         active_peers.remove(pc)
     await pc.close()
@@ -90,6 +113,7 @@ async def _cleanup_peer(pc: RTCPeerConnection) -> None:
 
 
 async def heartbeat_loop() -> None:
+    """Send periodic heartbeats so the API can track worker availability."""
     logger.info(
         "🫀 Starting heartbeat loop to %s (worker_id=%s, worker_url=%s)",
         API_URL,
@@ -123,11 +147,22 @@ async def heartbeat_loop() -> None:
 
 @app.get("/")
 async def get_status() -> dict[str, str]:
+    """Return readiness metadata for health probes.
+
+    Returns:
+        Service identifier and status metadata.
+    """
+
     return {"status": "running", "service": "voice_changer_echo_worker", "version": "1.0.0"}
 
 
 @app.get("/health")
 async def health_check() -> dict[str, object]:
+    """Report the current health state and connection metrics.
+
+    Returns:
+        Details about service status and active peers.
+    """
     return {
         "status": "healthy",
         "active_peers": len(active_peers),
@@ -139,6 +174,11 @@ async def health_check() -> dict[str, object]:
 
 @app.get("/capacity")
 async def get_capacity() -> dict[str, object]:
+    """Return current worker capacity and availability information.
+
+    Returns:
+        Worker identification, load, and availability status.
+    """
     return {
         "worker_id": WORKER_ID,
         "worker_url": WORKER_URL,
@@ -150,12 +190,21 @@ async def get_capacity() -> dict[str, object]:
 
 @app.post("/offer")
 async def handle_offer(payload: SDPModel) -> dict[str, str]:
+    """Accept an SDP offer and return the corresponding answer.
+
+    Args:
+        payload: The SDP model supplied by the signalling API.
+
+    Returns:
+        The generated SDP answer describing the worker session.
+    """
     pc = RTCPeerConnection()
     active_peers.add(pc)
     logger.info("📡 Received new WebRTC offer; active peers: %d", len(active_peers))
 
     @pc.on("connectionstatechange")
     async def on_connection_state_change() -> None:  # pragma: no cover - depends on network
+        """Monitor peer state changes and trigger cleanup when disconnected."""
         logger.info("Peer connection state: %s", pc.connectionState)
         if pc.connectionState in {"failed", "closed", "disconnected"}:
             await _cleanup_peer(pc)
@@ -164,6 +213,11 @@ async def handle_offer(payload: SDPModel) -> dict[str, str]:
 
     @pc.on("track")
     async def on_track(track: MediaStreamTrack) -> None:
+        """Handle incoming audio tracks by echoing frames back to the caller.
+
+        Args:
+            track: Remote track received from the signalling peer.
+        """
         logger.info("🎙️ Incoming track: %s", track.kind)
         if track.kind == "audio":
             echoed = EchoTrack(track)
@@ -172,6 +226,7 @@ async def handle_offer(payload: SDPModel) -> dict[str, str]:
 
             @track.on("ended")
             async def on_track_ended() -> None:
+                """Log track completion and dispose of the peer connection."""
                 logger.info("🏁 Audio track ended")
                 await _cleanup_peer(pc)
 

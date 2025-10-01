@@ -7,9 +7,10 @@ import inspect
 import json
 import logging
 import os
+import wave
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Awaitable, Callable
 from urllib import request
 
 import numpy as np
@@ -17,7 +18,6 @@ import typer
 from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.contrib.media import MediaPlayer
 from aiortc.mediastreams import MediaStreamError, MediaStreamTrack
-import wave
 
 try:
     from av import AudioFrame
@@ -33,6 +33,16 @@ logger = logging.getLogger(__name__)
 
 
 def _post_json(url: str, payload: dict[str, object], timeout: float = 15.0) -> dict[str, object]:
+    """Send a JSON payload to the worker API and parse the response.
+
+    Args:
+        url: Endpoint to which the JSON payload should be posted.
+        payload: Body to serialise and send in the HTTP request.
+        timeout: Maximum seconds to wait for the API response.
+
+    Returns:
+        Parsed JSON body returned by the worker API.
+    """
     data = json.dumps(payload).encode("utf-8")
     req = request.Request(url, data=data, headers={"Content-Type": "application/json"})
     with request.urlopen(req, timeout=timeout) as resp:
@@ -43,10 +53,25 @@ def _post_json(url: str, payload: dict[str, object], timeout: float = 15.0) -> d
 
 
 def _ensure_parent(path: Path) -> None:
+    """Ensure the parent directory exists for the provided path.
+
+    Args:
+        path: Target file path whose parent directory should be created.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
 def _validate_file_size(actual_file: Path, expected_file: Path, tolerance_pct: float = 15.0) -> bool:
+    """Compare output audio file size against an expected reference.
+
+    Args:
+        actual_file: Newly generated audio file to validate.
+        expected_file: Reference file representing the desired size envelope.
+        tolerance_pct: Percentage difference tolerated between file sizes.
+
+    Returns:
+        ``True`` if the size difference is within the tolerance threshold.
+    """
     if not expected_file.exists():
         logger.warning("⚠️ Expected file not found: %s", expected_file)
         return False
@@ -75,12 +100,20 @@ def _validate_file_size(actual_file: Path, expected_file: Path, tolerance_pct: f
 
 @dataclass(slots=True)
 class ClientConfig:
+    """Configuration governing how the client negotiates WebRTC sessions."""
+
     api_base: str = "http://localhost:8000"
     offer_path: str = "/webrtc/offer"
     wait_after_input: float = 1.0
 
 
 async def negotiate(pc: RTCPeerConnection, config: ClientConfig) -> None:
+    """Perform SDP offer/answer negotiation with the worker API.
+
+    Args:
+        pc: Peer connection that will generate and apply SDP descriptions.
+        config: Connection endpoints and timing configuration.
+    """
     offer = await pc.createOffer()
     await pc.setLocalDescription(offer)
 
@@ -100,6 +133,15 @@ async def negotiate(pc: RTCPeerConnection, config: ClientConfig) -> None:
 
 
 def _ensure_interleaved(frame: AudioFrame, channels: int) -> np.ndarray:
+    """Convert frame data into an interleaved numpy array.
+
+    Args:
+        frame: Audio frame produced by the remote track.
+        channels: Expected channel count for the audio frame.
+
+    Returns:
+        Interleaved PCM samples ready for writing to disk.
+    """
     array = frame.to_ndarray()
     if array.ndim == 1:
         if channels <= 0:
@@ -119,6 +161,11 @@ def _ensure_interleaved(frame: AudioFrame, channels: int) -> np.ndarray:
 
 
 def _drain_async(awaitable: Awaitable[object]) -> None:
+    """Ensure an awaitable is executed even when called from sync context.
+
+    Args:
+        awaitable: Coroutine or awaitable returned by a cleanup routine.
+    """
     async def _consume() -> None:
         try:
             await awaitable
@@ -139,6 +186,12 @@ class DurationLoggingTrack(MediaStreamTrack):
     kind = "audio"
 
     def __init__(self, source: MediaStreamTrack, label: str):
+        """Wrap a media track and log cumulative audio duration.
+
+        Args:
+            source: Underlying media track to proxy.
+            label: Human-readable identifier for log messages.
+        """
         super().__init__()
         self._source = source
         self._label = label
@@ -147,6 +200,11 @@ class DurationLoggingTrack(MediaStreamTrack):
         self._frame_count = 0
 
     async def recv(self) -> AudioFrame:  # type: ignore[override]
+        """Receive and return the next frame while updating duration metrics.
+
+        Returns:
+            Audio frame fetched from the underlying source.
+        """
         frame = await self._source.recv()
         assert isinstance(frame, AudioFrame)
 
@@ -173,6 +231,7 @@ class DurationLoggingTrack(MediaStreamTrack):
         return frame
 
     def stop(self) -> None:  # pragma: no cover - passthrough cleanup
+        """Stop the proxy track while draining asynchronous cleanup hooks."""
         maybe_awaitable = super().stop()
         if inspect.isawaitable(maybe_awaitable):
             _drain_async(maybe_awaitable)
@@ -185,6 +244,15 @@ class DurationLoggingTrack(MediaStreamTrack):
 
 
 async def record_audio(track: MediaStreamTrack, output_path: Path) -> int:
+    """Capture audio from a remote track and write it to disk.
+
+    Args:
+        track: Remote media track streaming audio from the worker.
+        output_path: Destination where recorded audio should be written.
+
+    Returns:
+        Number of audio frames recorded to the output file.
+    """
     total_frames = 0
     writer: wave.Wave_write | None = None
     sample_rate: int | None = None
@@ -201,7 +269,7 @@ async def record_audio(track: MediaStreamTrack, output_path: Path) -> int:
             frame_channels = getattr(frame.layout, "channels", None)
             if frame_channels is None:
                 frame_channels = getattr(frame, "channels", 1)
-            if isinstance(frame_channels, (list, tuple)):
+            if isinstance(frame_channels, list | tuple):
                 frame_channels = len(frame_channels)
             frame_width = frame.format.bytes
             frame_rate = frame.sample_rate
@@ -265,6 +333,18 @@ async def run_session(
     expected_output: Path | None = None,
     progress_cb: Callable[[str], None] | None = None,
 ) -> bool:
+    """Stream audio to the worker and optionally validate the recorded output.
+
+    Args:
+        input_path: Audio file to stream via WebRTC.
+        output_path: Destination for the recorded remote audio.
+        config: Runtime configuration controlling negotiation and waiting.
+        expected_output: Optional reference file for size comparison.
+        progress_cb: Optional callback used to report progress messages.
+
+    Returns:
+        ``True`` when audio is received and optional validation succeeds.
+    """
     progress = progress_cb or (lambda message: logger.info(message))
 
     player = MediaPlayer(str(input_path))
@@ -278,6 +358,11 @@ async def run_session(
 
     @pc.on("track")
     async def on_track(track):
+        """Handle remote tracks by starting the recorder when audio appears.
+
+        Args:
+            track: Remote track received from the worker.
+        """
         nonlocal record_task
         if track.kind != "audio":
             logger.debug("Ignoring non-audio track of kind %s", track.kind)
@@ -352,6 +437,17 @@ def main(  # pragma: no cover - CLI entry point
     ),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable debug logging"),
 ) -> None:
+    """Entry point for the WebRTC client command-line interface.
+
+    Args:
+        input_file: Audio to stream via WebRTC to the worker.
+        output_file: Destination path for the received audio.
+        api_base: Base URL of the worker API.
+        offer_path: Endpoint path used for SDP signalling.
+        wait_after_input: Seconds to wait after the local stream ends.
+        expected_file: Optional reference file used for validation.
+        verbose: Whether to enable verbose logging output.
+    """
     if verbose:
         logging.getLogger().setLevel(logging.DEBUG)
 
@@ -365,6 +461,11 @@ def main(  # pragma: no cover - CLI entry point
     config = ClientConfig(api_base=api_base, offer_path=offer_path, wait_after_input=wait_after_input)
 
     def progress(message: str) -> None:
+        """Display progress messages for the CLI workflow.
+
+        Args:
+            message: Text to echo to the terminal.
+        """
         typer.echo(f"   {message}")
 
     success = asyncio.run(
