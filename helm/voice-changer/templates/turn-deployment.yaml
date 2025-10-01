@@ -75,9 +75,18 @@ spec:
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.turn.affinity }}
+      {{- $affinity := dict }}
+      {{- if not (empty .Values.turn.affinity) }}
+        {{- range $key, $value := .Values.turn.affinity }}
+          {{- $_ := set $affinity $key $value -}}
+        {{- end }}
+      {{- end }}
+      {{- if not (empty .Values.turn.nodeAffinity) }}
+        {{- $_ := set $affinity "nodeAffinity" .Values.turn.nodeAffinity -}}
+      {{- end }}
+      {{- if gt (len $affinity) 0 }}
       affinity:
-        {{- toYaml . | nindent 8 }}
+        {{- toYaml $affinity | nindent 8 }}
       {{- end }}
       {{- with .Values.turn.tolerations }}
       tolerations:

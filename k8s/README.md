@@ -30,6 +30,74 @@ This command will:
 - Wait for pods to be ready
 - Display access URLs
 
+## Simulate public and private nodes with kind
+
+The repository ships with a kind configuration that exposes the control-plane
+node to your host while keeping the worker nodes private. This lets you mimic a
+public ingress node for the API and TURN server alongside private worker nodes.
+
+```bash
+./setup.sh              # Installs kind alongside the other prerequisites
+kind create cluster --config k8s/kind-public-private.yaml
+
+# Label nodes to target them with Helm node affinity rules
+kubectl label node kind-control-plane topology=public
+kubectl label node kind-worker topology=private
+kubectl label node kind-worker2 topology=private
+```
+
+Update your Helm values to pin services to the desired nodes. For example, to
+schedule the API and TURN pods on the public control plane and all workers on
+the private nodes:
+
+```yaml
+api:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: topology
+              operator: In
+              values:
+                - public
+
+turn:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: topology
+              operator: In
+              values:
+                - public
+
+worker:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: topology
+              operator: In
+              values:
+                - private
+
+frontend:
+  nodeAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: topology
+              operator: In
+              values:
+                - public
+```
+
+Apply the chart with the updated values file:
+
+```bash
+helm upgrade --install voice-changer ./helm/voice-changer -f my-kind-values.yaml
+```
+
 ## Access the Application
 
 After deployment, the services are accessible via minikube's IP:
