@@ -3,6 +3,8 @@
 
 set -euo pipefail
 
+DOCKER_AVAILABLE=1
+
 INSTALL_ROOT="${HOME}/.local"
 BIN_DIR="${INSTALL_ROOT}/bin"
 CACHE_DIR="${INSTALL_ROOT}/cache/setup"
@@ -21,11 +23,19 @@ require_command() {
 }
 
 check_prerequisites() {
-    local dependencies=(curl docker python3 tar)
+    local dependencies=(curl python3 tar)
 
     for dependency in "${dependencies[@]}"; do
         require_command "${dependency}"
     done
+
+    if ! command -v docker >/dev/null 2>&1; then
+        DOCKER_AVAILABLE=0
+        cat <<'WARNING' >&2
+⚠️ Docker was not detected. Install Docker to use the default Minikube driver and run --verify.
+You can override the Minikube driver by exporting MINIKUBE_DRIVER before running setup.sh.
+WARNING
+    fi
 }
 
 append_path_hint() {
@@ -88,13 +98,14 @@ install_helm() {
     version="${HELM_VERSION:-latest}"
     if [[ "${version}" == "latest" ]]; then
         version=$(curl -fsSL https://api.github.com/repos/helm/helm/releases/latest \
-            | grep -o '"tag_name":"[^"]*"' | head -n1 | cut -d'"' -f4)
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["tag_name"])')
     fi
 
     local archive="${CACHE_DIR}/helm-${version}.tar.gz"
     local extract_dir
     extract_dir="${CACHE_DIR}/helm-${version}"
 
+    rm -rf "${extract_dir}"
     mkdir -p "${extract_dir}"
     curl -fsSLo "${archive}" "https://get.helm.sh/helm-${version}-linux-amd64.tar.gz"
     tar -xzf "${archive}" -C "${extract_dir}" --strip-components=1
@@ -111,7 +122,7 @@ install_just() {
     version="${JUST_VERSION:-latest}"
     if [[ "${version}" == "latest" ]]; then
         version=$(curl -fsSL https://api.github.com/repos/casey/just/releases/latest \
-            | grep -o '"tag_name":"[^"]*"' | head -n1 | cut -d'"' -f4)
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["tag_name"])')
     fi
 
     local machine
@@ -134,9 +145,12 @@ install_just() {
     archive="${CACHE_DIR}/just-${version}-${target}.tar.gz"
     local extract_dir
     extract_dir="${CACHE_DIR}/just-${version}-${target}"
+    local asset
+    asset="just-${version}-${target}.tar.gz"
 
+    rm -rf "${extract_dir}"
     mkdir -p "${extract_dir}"
-    curl -fsSLo "${archive}" "https://github.com/casey/just/releases/download/${version}/just-${target}.tar.gz"
+    curl -fsSLo "${archive}" "https://github.com/casey/just/releases/download/${version}/${asset}"
     tar -xzf "${archive}" -C "${extract_dir}"
     install -m 0755 "${extract_dir}/just" "${BIN_DIR}/just"
 }
@@ -167,6 +181,13 @@ ensure_minikube_running() {
 
     local driver
     driver="${MINIKUBE_DRIVER:-docker}"
+    if [[ "${driver}" == "docker" && "${DOCKER_AVAILABLE}" -ne 1 ]]; then
+        cat <<'ERROR' >&2
+Docker is required for the Minikube docker driver but was not detected.
+Install Docker or set MINIKUBE_DRIVER to a supported alternative before rerunning --verify.
+ERROR
+        exit 1
+    fi
     echo "🚜 Starting Minikube with driver '${driver}'"
     minikube start --driver="${driver}"
 }
