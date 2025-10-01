@@ -32,7 +32,7 @@ class SDPModel(BaseModel):
 
 TARGET_SAMPLE_RATE = 48_000
 DEFAULT_PITCH_SHIFT = 4.0
-MAX_BUFFER_FRAMES = 1
+MAX_BUFFER_FRAMES = 16
 
 
 class PitchShiftTrack(MediaStreamTrack):
