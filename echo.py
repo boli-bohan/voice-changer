@@ -7,15 +7,12 @@ import asyncio
 import logging
 import os
 import uuid
-import wave
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import httpx
 from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.mediastreams import MediaStreamTrack
 from av import AudioFrame
-import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -66,59 +63,11 @@ class EchoTrack(MediaStreamTrack):
     def __init__(self, source: MediaStreamTrack):
         super().__init__()
         self._source = source
-        self._debug_dir = Path(f"/tmp/audio/{WORKER_ID}")
-        self._debug_dir.mkdir(parents=True, exist_ok=True)
-        self._input_wav_path = self._debug_dir / "input.wav"
-        self._output_wav_path = self._debug_dir / "output.wav"
-        self._input_wav = wave.open(str(self._input_wav_path), "wb")
-        self._input_wav.setnchannels(1)
-        self._input_wav.setsampwidth(2)
-        self._input_wav.setframerate(48_000)
-        self._output_wav = wave.open(str(self._output_wav_path), "wb")
-        self._output_wav.setnchannels(1)
-        self._output_wav.setsampwidth(2)
-        self._output_wav.setframerate(48_000)
-        logger.info("🎙️ Echo worker debug audio streaming enabled: %s", self._debug_dir)
 
     async def recv(self) -> AudioFrame:  # type: ignore[override]
-        frame = await self._source.recv()
+        """Return the next frame received from the source without modification."""
 
-        samples = frame.to_ndarray()
-        if samples.ndim == 1:
-            mono = samples.astype(np.float32, copy=False)
-        else:
-            mono = samples[0].astype(np.float32, copy=False)
-
-        if np.issubdtype(samples.dtype, np.integer):
-            info = np.iinfo(samples.dtype)
-            denom = float(max(abs(info.min), info.max)) or 1.0
-            mono = mono / denom
-        elif np.issubdtype(samples.dtype, np.floating):
-            pass
-        else:  # pragma: no cover - defensive fallback
-            peak = float(np.max(np.abs(mono))) or 1.0
-            mono = mono / peak
-
-        mono = np.clip(mono, -1.0, 1.0)
-        pcm16 = (mono * 32767.0).astype(np.int16)
-        if pcm16.size:
-            bytes_ = pcm16.tobytes()
-            self._input_wav.writeframes(bytes_)
-            self._output_wav.writeframes(bytes_)
-
-        return frame
-
-    def close_debug_files(self) -> None:
-        try:
-            self._input_wav.close()
-            self._output_wav.close()
-            logger.info(
-                "💾 Echo debug audio saved: input=%s output=%s",
-                self._input_wav_path,
-                self._output_wav_path,
-            )
-        except Exception as exc:
-            logger.warning("⚠️ Error closing echo debug WAV files: %s", exc)
+        return await self._source.recv()
 
 
 active_peers: set[RTCPeerConnection] = set()
@@ -220,7 +169,6 @@ async def handle_offer(payload: SDPModel) -> dict[str, str]:
             @track.on("ended")
             async def on_track_ended() -> None:
                 logger.info("🏁 Audio track ended")
-                echoed.close_debug_files()
                 await _cleanup_peer(pc)
 
     offer = RTCSessionDescription(sdp=payload.sdp, type=payload.type)

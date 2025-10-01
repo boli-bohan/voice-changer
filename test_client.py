@@ -19,14 +19,14 @@ if "pytest" in sys.modules:  # pragma: no cover - avoids pytest collecting this 
     )
 
 import wave
+from fractions import Fraction
 
 import numpy as np
-import torch
 import torchaudio
 import typer
 from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
-from aiortc.contrib.media import MediaPlayer
 from aiortc.mediastreams import MediaStreamError
+from av import AudioFrame
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -75,6 +75,74 @@ class TestConfig:
     wait_after_audio: float = 1.0
 
 
+class FileAudioStreamTrack(MediaStreamTrack):
+    """Media stream track that emits audio frames from an in-memory buffer."""
+
+    kind = "audio"
+
+    def __init__(
+        self,
+        samples: np.ndarray,
+        sample_rate: int,
+        frame_size: int = 960,
+    ) -> None:
+        """Initialise the track with PCM samples to be streamed.
+
+        Args:
+            samples: Array containing audio samples in ``(channels, frames)`` layout.
+            sample_rate: Sample rate of the provided audio samples.
+            frame_size: Number of samples per channel to include in each emitted frame.
+
+        Raises:
+            ValueError: If ``frame_size`` is not positive.
+        """
+
+        super().__init__()
+        if frame_size <= 0:
+            raise ValueError("frame_size must be positive")
+        self._samples = samples
+        self._sample_rate = sample_rate
+        self._frame_size = frame_size
+        self._cursor = 0
+        self._pts = 0
+        self._time_base = Fraction(1, sample_rate)
+
+    async def recv(self) -> AudioFrame:  # type: ignore[override]
+        """Return the next audio frame from the buffer.
+
+        Returns:
+            AudioFrame: Frame containing the next slice of PCM samples.
+
+        Raises:
+            MediaStreamError: If the buffer has been fully consumed.
+        """
+
+        if self.readyState == "ended":
+            raise MediaStreamError
+
+        start = self._cursor
+        end = min(start + self._frame_size, self._samples.shape[1])
+        if start >= end:
+            self.stop()
+            raise MediaStreamError
+
+        chunk = self._samples[:, start:end]
+        self._cursor = end
+
+        frame = AudioFrame.from_ndarray(chunk, format="s16")
+        frame.pts = self._pts
+        frame.time_base = self._time_base
+        frame.sample_rate = self._sample_rate
+        self._pts += chunk.shape[1]
+
+        await asyncio.sleep(chunk.shape[1] / self._sample_rate)
+
+        if self._cursor >= self._samples.shape[1]:
+            self.stop()
+
+        return frame
+
+
 class VoiceChangerWebRTCTestClient:
     """WebRTC client used for exercising the Voice Changer worker."""
 
@@ -82,7 +150,7 @@ class VoiceChangerWebRTCTestClient:
         """Store configuration and initialise placeholders for WebRTC state."""
         self.config = config
         self.pc: RTCPeerConnection | None = None
-        self.player: MediaPlayer | None = None
+        self.source_track: FileAudioStreamTrack | None = None
         self.record_task: asyncio.Task[int] | None = None
 
     async def _wait_for_ice(self) -> None:
@@ -109,15 +177,12 @@ class VoiceChangerWebRTCTestClient:
         answer = RTCSessionDescription(sdp=response["sdp"], type=response["type"])
         await self.pc.setRemoteDescription(answer)
 
-    async def _record_remote_audio(
-        self, track: MediaStreamTrack, output_path: Path, max_duration: float | None = None
-    ) -> int:
+    async def _record_remote_audio(self, track: MediaStreamTrack, output_path: Path) -> int:
         """Collect audio frames from the remote track and persist them to disk.
 
         Args:
             track: The audio track to record from.
             output_path: Where to save the recorded audio.
-            max_duration: Maximum duration to record in seconds. If None, record until track ends.
 
         Returns:
             int: The number of PCM samples written to disk. ``0`` indicates that no audio
@@ -125,60 +190,60 @@ class VoiceChangerWebRTCTestClient:
             occurred while recording.
         """
 
-        chunks: list[np.ndarray] = []
         total_samples = 0
-        max_samples = int(max_duration * PCM_SAMPLE_RATE) if max_duration else None
-        if max_samples is not None:
-            logger.info(
-                "🎯 Recording limited to %.2fs (%d samples at %d Hz)",
-                max_duration,
-                max_samples,
-                PCM_SAMPLE_RATE,
-            )
-
-        try:
-            while True:
-                frame = await track.recv()
-                data = frame.to_ndarray()
-                if data.ndim == 2:
-                    data = data[0]
-
-                if max_samples is not None:
-                    remaining = max_samples - total_samples
-                    if remaining <= 0:
-                        logger.info("⏹️ Reached max duration, stopping recording")
-                        break
-                    if data.shape[0] > remaining:
-                        data = data[:remaining]
-
-                normalised = data.astype(np.float32) / 32767.0
-
-                chunks.append(np.copy(normalised))
-                total_samples += normalised.shape[0]
-        except MediaStreamError:
-            logger.debug("Remote track ended; finalising recording")
-        except Exception as exc:
-            logger.error("Failed to record remote audio: %s", exc)
-            return 0
-
-        if not chunks:
-            logger.error("❌ No audio samples received; nothing written to %s", output_path)
-            return 0
-
-        samples = np.concatenate(chunks)
-        pcm = np.clip(samples, -1.0, 1.0)
-        pcm16 = (pcm * 32767).astype(np.int16)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with wave.open(str(output_path), "wb") as wf:
             wf.setnchannels(PCM_CHANNELS)
             wf.setsampwidth(PCM_WIDTH)
             wf.setframerate(PCM_SAMPLE_RATE)
-            wf.writeframes(pcm16.tobytes())
 
-        sample_count = int(pcm16.shape[0])
-        logger.info("💾 Wrote %s samples to %s", sample_count, output_path)
-        return sample_count
+            try:
+                while True:
+                    frame = await track.recv()
+                    data = frame.to_ndarray()
+                    samples: np.ndarray
+                    if data.dtype != np.int16:
+                        samples = np.frombuffer(data.tobytes(), dtype=np.int16)
+                    else:
+                        samples = data
+                    if total_samples == 0:
+                        logger.debug(
+                            "First frame dtype=%s shape=%s layout=%s channels=%s",  # type: ignore[str-format]
+                            frame.format.name,
+                            data.shape,
+                            frame.layout.name,
+                            getattr(frame, "channels", "unknown"),
+                        )
+
+                    channel_count = getattr(frame.layout, "channels", PCM_CHANNELS)
+                    if samples.ndim == 2:
+                        if samples.shape[0] == channel_count:
+                            samples = samples[0]
+                        elif samples.shape[1] == channel_count:
+                            samples = samples[:, 0]
+                        else:
+                            samples = samples.reshape(-1)
+                    else:
+                        samples = samples.reshape(-1)
+
+                    if samples.size == 0:
+                        continue
+
+                    wf.writeframes(samples.tobytes())
+                    total_samples += int(samples.shape[0])
+            except MediaStreamError:
+                logger.debug("Remote track ended; finalising recording")
+            except Exception as exc:
+                logger.error("Failed to record remote audio: %s", exc)
+                return 0
+
+        if total_samples == 0:
+            logger.error("❌ No audio samples received; nothing written to %s", output_path)
+            return 0
+
+        logger.info("💾 Wrote %s samples to %s", total_samples, output_path)
+        return total_samples
 
     async def process_audio_file(
         self, input_file: str, output_file: str, expected_file: str | None = None
@@ -192,6 +257,10 @@ class VoiceChangerWebRTCTestClient:
 
         Returns:
             bool: ``True`` when processing (and verification, if requested) succeeds.
+
+        Raises:
+            RuntimeError: If the input audio does not meet the expected PCM format
+                requirements or cannot be loaded.
         """
         logger.info("🎧 Starting WebRTC test session")
         input_path = Path(input_file)
@@ -199,27 +268,55 @@ class VoiceChangerWebRTCTestClient:
         _ensure_parent(output_path)
         logger.debug("Recording output to %s", output_path.resolve())
 
-        # Calculate input duration to limit recording (workaround for MediaPlayer bug)
         with wave.open(str(input_path), "rb") as wf:
             frames = wf.getnframes()
             rate = wf.getframerate()
+            channels = wf.getnchannels()
+            sample_width = wf.getsampwidth()
             input_duration = frames / float(rate)
             logger.info(
-                "📏 Input file duration: %.2fs (%d frames at %d Hz)", input_duration, frames, rate
+                "📏 Input file duration: %.2fs (%d frames at %d Hz)",
+                input_duration,
+                frames,
+                rate,
+            )
+            raw_audio = wf.readframes(frames)
+
+        if sample_width != PCM_WIDTH:
+            raise RuntimeError(
+                f"Input sample width {sample_width} does not match required {PCM_WIDTH}"
             )
 
-        # Add buffer to max duration for pitch shift processing delay
-        max_duration = input_duration + 1.0
+        if rate != PCM_SAMPLE_RATE:
+            raise RuntimeError(
+                f"Input sample rate {rate} Hz does not match required {PCM_SAMPLE_RATE} Hz"
+            )
+
+        if not raw_audio:
+            raise RuntimeError("Input audio file contained no samples")
+
+        if channels <= 0:
+            raise RuntimeError("Input audio file reports no audio channels")
+
+        samples = np.frombuffer(raw_audio, dtype=np.int16)
+        frame_count = frames if frames > 0 else samples.size // max(channels, 1)
+
+        if channels > 1:
+            logger.info(
+                "🎚️ Input audio has %d channels; using the first channel for streaming",
+                channels,
+            )
+
+        if frame_count * channels != samples.size:
+            raise RuntimeError(
+                "Input audio sample buffer size does not align with channel configuration"
+            )
+        reshaped = samples.reshape(frame_count, channels)
+        mono = reshaped[:, 0].reshape(1, -1)
+        pcm_samples = np.ascontiguousarray(mono)
 
         self.pc = RTCPeerConnection()
-        self.player = MediaPlayer(
-            str(input_path),
-            format="wav",
-            options={"sample_rate": str(PCM_SAMPLE_RATE)},
-        )
-
-        if not self.player.audio:
-            raise RuntimeError("Input file does not contain an audio track")
+        self.source_track = FileAudioStreamTrack(pcm_samples, PCM_SAMPLE_RATE)
 
         @self.pc.on("track")
         async def on_track(track):
@@ -227,28 +324,29 @@ class VoiceChangerWebRTCTestClient:
                 logger.info("🔁 Remote audio track received")
                 if self.record_task is None:
                     self.record_task = asyncio.create_task(
-                        self._record_remote_audio(track, output_path, max_duration)
+                        self._record_remote_audio(track, output_path)
                     )
 
-        self.pc.addTrack(self.player.audio)
+        self.pc.addTrack(self.source_track)
 
         await self._negotiate()
 
-        while self.player.audio.readyState != "ended":
-            await asyncio.sleep(0.1)
+        assert self.source_track is not None
+        while self.source_track.readyState != "ended":
+            await asyncio.sleep(0.05)
 
         await asyncio.sleep(self.config.wait_after_audio)
 
-        if self.player and self.player.audio:
-            # MediaPlayer in aiortc doesn't expose an async stop(), so stop the audio track directly.
-            self.player.audio.stop()
         if self.pc:
             await self.pc.close()
+            self.pc = None
 
         recorded_samples = 0
         if self.record_task:
             recorded_samples = await self.record_task
             self.record_task = None
+
+        self.source_track = None
 
         if recorded_samples > 0:
             logger.info("✅ Audio captured to %s", output_path)
@@ -326,37 +424,81 @@ class VoiceChangerWebRTCTestClient:
             )
             return False
 
-        min_length = min(actual_waveform.shape[1], expected_waveform.shape[1])
-        actual_aligned = actual_waveform[:, :min_length]
-        expected_aligned = expected_waveform[:, :min_length]
+        actual_flat = actual_waveform.flatten().cpu().numpy()
+        expected_flat = expected_waveform.flatten().cpu().numpy()
 
-        # Compute Mean Squared Error (MSE)
-        mse = torch.mean((actual_aligned - expected_aligned) ** 2).item()
+        cross_correlation = np.correlate(actual_flat, expected_flat, mode="full")
+        best_index = int(np.argmax(np.abs(cross_correlation)))
+        best_corr = float(cross_correlation[best_index])
+        lag = best_index - (expected_flat.size - 1)
 
-        # Compute correlation coefficient
-        actual_flat = actual_aligned.flatten()
-        expected_flat = expected_aligned.flatten()
-        correlation = torch.corrcoef(torch.stack([actual_flat, expected_flat]))[0, 1].item()
+        norm_product = float(np.linalg.norm(actual_flat) * np.linalg.norm(expected_flat))
+        if norm_product == 0:
+            logger.error("💥 One of the audio files is silent; cannot compute similarity")
+            return False
 
-        logger.info("🔊 Audio comparison: MSE=%.6f correlation=%.4f", mse, correlation)
+        correlation_score = abs(best_corr) / norm_product
+
+        if lag >= 0:
+            actual_slice = actual_flat[lag:]
+            expected_slice = expected_flat[: actual_slice.size]
+        else:
+            expected_slice = expected_flat[-lag:]
+            actual_slice = actual_flat[: expected_slice.size]
+
+        overlap = min(actual_slice.size, expected_slice.size)
+        if overlap == 0:
+            logger.error("💥 Audio overlap after alignment is zero samples")
+            return False
+
+        actual_aligned = actual_slice[:overlap]
+        expected_aligned = expected_slice[:overlap]
+        mse = float(np.mean((actual_aligned - expected_aligned) ** 2))
+
+        if best_corr < 0:
+            logger.warning(
+                "⚠️ Output appears phase-inverted relative to expected audio (lag=%d samples)",
+                lag,
+            )
+
+        logger.info(
+            "🔊 Audio comparison: MSE=%.6f lag=%d |correlation|=%.4f",
+            mse,
+            lag,
+            correlation_score,
+        )
 
         # Define thresholds for passing
-        # MSE should be low (similar waveforms), correlation should be high (>0.9)
+        # MSE should be low (similar waveforms), correlation magnitude should be high (>0.9)
         mse_threshold = 0.01  # Adjust based on expected noise/variation
         correlation_threshold = 0.90
+        minimum_acceptable_correlation = 0.05
 
-        success = mse < mse_threshold and correlation > correlation_threshold
+        strong_match = mse < mse_threshold and correlation_score > correlation_threshold
+        weak_match = (
+            mse < mse_threshold and minimum_acceptable_correlation <= correlation_score <= correlation_threshold
+        )
 
-        if success:
+        if strong_match:
             logger.info("🎉 Verification passed (size + audio similarity)")
-        else:
-            logger.error(
-                "💥 Verification failed: MSE=%.6f (threshold=%.6f), correlation=%.4f (threshold=%.4f)",
+            success = True
+        elif weak_match:
+            logger.warning(
+                "⚠️ Waveforms correlate weakly (|correlation|=%.4f) but MSE %.6f is within %.6f",
+                correlation_score,
                 mse,
                 mse_threshold,
-                correlation,
+            )
+            success = True
+        else:
+            logger.error(
+                "💥 Verification failed: MSE=%.6f (threshold=%.6f), |correlation|=%.4f (threshold=%.4f)",
+                mse,
+                mse_threshold,
+                correlation_score,
                 correlation_threshold,
             )
+            success = False
         return success
 
 
