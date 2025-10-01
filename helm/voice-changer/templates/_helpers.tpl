@@ -119,3 +119,38 @@ Frontend full name
 {{- define "voice-changer.frontend.fullname" -}}
 {{ .Values.global.appName }}-{{ .Values.frontend.name }}
 {{- end }}
+
+{{/*
+TURN component labels
+*/}}
+{{- define "voice-changer.turn.labels" -}}
+{{ include "voice-changer.labels" . }}
+app: {{ .Values.global.appName }}
+component: {{ .Values.turn.name }}
+{{- end }}
+
+{{/*
+TURN selector labels
+*/}}
+{{- define "voice-changer.turn.selectorLabels" -}}
+app: {{ .Values.global.appName }}
+component: {{ .Values.turn.name }}
+{{- end }}
+
+{{/*
+TURN full name
+*/}}
+{{- define "voice-changer.turn.fullname" -}}
+{{ .Values.global.appName }}-{{ .Values.turn.name }}
+{{- end }}
+
+{{/*
+TURN secret name
+*/}}
+{{- define "voice-changer.turn.secretName" -}}
+{{- if .Values.turn.credentials.static.existingSecret }}
+{{- .Values.turn.credentials.static.existingSecret }}
+{{- else }}
+{{- printf "%s-turn-credentials" (include "voice-changer.turn.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+{{- end }}

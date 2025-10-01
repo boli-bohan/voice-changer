@@ -124,3 +124,45 @@ frontend:
       port: 80
     initialDelaySeconds: 5
     periodSeconds: 5
+
+# TURN server configuration
+turn:
+  enabled: false
+  name: turn
+  replicaCount: 1
+
+  image:
+    repository: coturn/coturn
+    tag: "4.6.2"
+    pullPolicy: IfNotPresent
+
+  service:
+    type: LoadBalancer
+    annotations: {}
+    loadBalancerIP: ""
+    externalTrafficPolicy: ""
+
+  hostNetwork: false
+
+  ports:
+    tcp: 3478
+    tls: 5349
+    udp:
+      min: 49152
+      max: 49252
+
+  relay:
+    realm: voice-changer.example.com
+    publicIP: ""
+
+  credentials:
+    static:
+      enabled: true
+      username: voice-user
+      password: change-me
+      existingSecret: ""
+
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
