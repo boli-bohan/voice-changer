@@ -98,6 +98,48 @@ Apply the chart with the updated values file:
 helm upgrade --install voice-changer ./helm/voice-changer -f my-kind-values.yaml
 ```
 
+## Expose LoadBalancer services on kind with MetalLB
+
+When you need stable IPs for services such as WebRTC media endpoints you can
+pair kind with Calico and MetalLB. MetalLB allocates addresses from your local
+network so that `LoadBalancer` services become directly reachable on your LAN.
+
+1. **Create a kind cluster prepared for Calico and MetalLB**
+
+   ```bash
+   kind create cluster --name webrtc --config k8s/kind-metallb-config.yaml
+   ```
+
+2. **Install Calico for pod networking**
+
+   ```bash
+   kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/calico.yaml
+   kubectl wait --namespace calico-system --for=condition=available deployment/calico-kube-controllers --timeout=120s
+   ```
+
+3. **Install MetalLB**
+
+   ```bash
+   kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.14.7/config/manifests/metallb-native.yaml
+   kubectl wait --namespace metallb-system --for=condition=available deployment/controller --timeout=120s
+   kubectl wait --namespace metallb-system --for=condition=ready pod -l component=speaker --timeout=120s
+   ```
+
+4. **Configure an address pool**
+
+   Edit `k8s/metallb-config.yaml` and replace the example `192.168.1.240-192.168.1.250`
+   range with IPs that are unused on your LAN. Apply the configuration:
+
+   ```bash
+   kubectl apply -f k8s/metallb-config.yaml
+   ```
+
+5. **Expose services with LoadBalancer**
+
+   Update your service manifests to use `type: LoadBalancer`. MetalLB assigns
+   one of the configured IPs, allowing STUN to discover the address without a
+   TURN relay.
+
 ## Access the Application
 
 After deployment, the services are accessible via minikube's IP:

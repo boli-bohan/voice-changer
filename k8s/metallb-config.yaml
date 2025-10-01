@@ -1,0 +1,19 @@
+# metallb-config.yaml
+#
+# Replace the example IP range with addresses that are free on your local
+# network. MetalLB will assign these IPs to LoadBalancer services created in
+# the cluster.
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: voice-changer-pool
+  namespace: metallb-system
+spec:
+  addresses:
+    - 192.168.1.240-192.168.1.250
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: voice-changer-l2
+  namespace: metallb-system
