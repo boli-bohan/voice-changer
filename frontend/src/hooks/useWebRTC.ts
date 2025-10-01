@@ -32,6 +32,8 @@ export const useWebRTC = ({
   const localTracksRef = useRef<MediaStreamTrack[]>([])
   const remoteStreamRef = useRef<MediaStream | null>(null)
   const remoteAudioElementRef = useRef<HTMLAudioElement | null>(null)
+  const controlChannelRef = useRef<RTCDataChannel | null>(null)
+  const controlReadyRef = useRef(false)
 
   const [connectionState, setConnectionState] = useState<
     'connecting' | 'connected' | 'disconnected'
@@ -69,6 +71,16 @@ export const useWebRTC = ({
       if (remoteAudioElementRef.current) {
         remoteAudioElementRef.current.srcObject = null
       }
+
+      if (controlChannelRef.current) {
+        try {
+          controlChannelRef.current.close()
+        } catch (error) {
+          console.warn('Failed to close control data channel cleanly', error)
+        }
+      }
+      controlChannelRef.current = null
+      controlReadyRef.current = false
 
       setIsTalking(false)
       updateStatus('disconnected')
@@ -164,6 +176,21 @@ export const useWebRTC = ({
       const pc = new RTCPeerConnection()
       peerRef.current = pc
 
+      const controlChannel = pc.createDataChannel('control')
+      controlChannelRef.current = controlChannel
+      controlChannel.onopen = () => {
+        controlReadyRef.current = true
+      }
+      controlChannel.onclose = () => {
+        controlReadyRef.current = false
+      }
+      controlChannel.onmessage = (event) => {
+        if (typeof event.data === 'string' && event.data.trim().toLowerCase() === 'flush_done') {
+          // No-op: the worker will flush asynchronously; we do not wait on it client-side.
+          return
+        }
+      }
+
       localStream.getTracks().forEach((track) => {
         pc.addTrack(track, localStream)
       })
@@ -224,6 +251,15 @@ export const useWebRTC = ({
 
   const stopTalking = useCallback(() => {
     setTalkingState(false)
+
+    const channel = controlChannelRef.current
+    if (channel && controlReadyRef.current && channel.readyState === 'open') {
+      try {
+        channel.send('flush')
+      } catch (error) {
+        console.warn('Failed to send flush control message', error)
+      }
+    }
   }, [setTalkingState])
 
   return {

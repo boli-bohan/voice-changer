@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -257,13 +258,31 @@ func main() {
 		AllowCredentials: true,
 	}).Handler(router)
 
+	port := os.Getenv("API_PORT")
+	if port == "" {
+		port = "8000"
+	}
+
+	host := os.Getenv("API_HOST")
+	if host == "" {
+		host = "0.0.0.0"
+	}
+
+	publicHost := os.Getenv("API_PUBLIC_HOST")
+	if publicHost == "" {
+		publicHost = "127.0.0.1"
+	}
+
+	baseURL := fmt.Sprintf("http://%s:%s", publicHost, port)
+	listenAddr := fmt.Sprintf("%s:%s", host, port)
+
 	log.Println("🚀 Voice Changer API Server starting...")
-	log.Println("📡 Signalling endpoint at http://127.0.0.1:8000/webrtc/offer")
+	log.Printf("📡 Signalling endpoint at %s/webrtc/offer\n", baseURL)
 	log.Println("🔄 Load balancing enabled with dynamic worker discovery")
-	log.Println("💓 Heartbeat endpoint at http://127.0.0.1:8000/heartbeat")
+	log.Printf("💓 Heartbeat endpoint at %s/heartbeat\n", baseURL)
 	log.Println("⚡ Press Ctrl+C to stop")
 
-	if err := http.ListenAndServe(":8000", corsHandler); err != nil {
+	if err := http.ListenAndServe(listenAddr, corsHandler); err != nil {
 		log.Fatalf("Server failed to start: %v", err)
 	}
 }

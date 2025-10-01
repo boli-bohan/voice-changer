@@ -29,6 +29,8 @@ spec:
         env:
         - name: PYTHONUNBUFFERED
           value: {{ .Values.worker.env.pythonUnbuffered | quote }}
+        - name: WORKER_PORT
+          value: {{ .Values.worker.service.targetPort | quote }}
         - name: POD_IP
           valueFrom:
             fieldRef:

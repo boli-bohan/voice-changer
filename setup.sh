@@ -89,25 +89,6 @@ install_minikube() {
     chmod +x "${BIN_DIR}/minikube"
 }
 
-install_kind() {
-    if command -v kind >/dev/null 2>&1; then
-        return 0
-    fi
-
-    local version
-    version="${KIND_VERSION:-latest}"
-    if [[ "${version}" == "latest" ]]; then
-        version=$(curl -fsSL https://api.github.com/repos/kubernetes-sigs/kind/releases/latest \
-            | python3 -c 'import json, sys; print(json.load(sys.stdin)["tag_name"])')
-    fi
-
-    local url
-    url="https://kind.sigs.k8s.io/dl/${version}/kind-linux-amd64"
-
-    curl -fsSLo "${BIN_DIR}/kind" "${url}"
-    chmod +x "${BIN_DIR}/kind"
-}
-
 install_helm() {
     if command -v helm >/dev/null 2>&1; then
         return 0
@@ -218,7 +199,7 @@ verify_install() {
     helm uninstall voice-changer >/dev/null 2>&1 || true
     ensure_minikube_running
     ./scripts/build-images.sh
-    SKIP_BUILD_IMAGES=1 just helm-install
+    SKIP_BUILD_IMAGES=1 just helm
 
     local cluster_ip
     cluster_ip="$(minikube ip)"
@@ -248,7 +229,7 @@ Usage: ./setup.sh [--verify]
 
 Installs Minikube, kubectl, Helm, uv, just, and Python dependencies into $HOME.
 
-  --verify   Build images, deploy with `just helm-install`, and run the regression client.
+  --verify   Build images, deploy with `just helm`, and run the regression client.
 USAGE
                 return 0
                 ;;
@@ -266,7 +247,6 @@ USAGE
     install_python_dependencies
     install_kubectl
     install_minikube
-    install_kind
     install_helm
     install_just
 
@@ -282,12 +262,9 @@ Ensure your Docker daemon is running and that the following directory is on your
 To start Minikube against the local Docker daemon:
   minikube start --driver=docker
 
-Create a kind cluster with a public control-plane node and private workers:
-  kind create cluster --config k8s/kind-public-private.yaml
-
 Build Kubernetes images, install the Helm chart, and run the regression client:
   ./scripts/build-images.sh
-  just helm-install
+  just helm
   uv run ./test_client.py --api-base "http://$(minikube ip):30900"
 
 Re-run verification any time with:

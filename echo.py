@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
-MAX_BUFFER_FRAMES = 8
+MAX_BUFFER_FRAMES = 2
 
 
 class SDPModel(BaseModel):
@@ -234,4 +234,4 @@ if __name__ == "__main__":
     import uvicorn
 
     logger.info("🚀 Starting Echo WebRTC Worker Service")
-    uvicorn.run("echo:app", host="127.0.0.1", port=8001, log_level="info")
+    uvicorn.run("echo:app", host="127.0.0.1", port=SETTINGS.worker_port, log_level="info")

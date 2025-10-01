@@ -33,12 +33,12 @@ just down       # Stop all services
 just status     # Check which services are running
 ```
 
-### Kubernetes Deployment
+### Kubernetes Deployment (Helm)
 ```bash
-just k8s        # Deploy to minikube (API:30900, Worker:30901, Frontend:30000)
-just k8s-down   # Delete kubernetes resources
-just k8s-status # Check deployment status
-just k8s-logs   # View logs from all pods
+just helm         # Build images (unless SKIP_BUILD_IMAGES=1) and install/upgrade the Helm release
+SKIP_BUILD_IMAGES=1 just helm  # Reuse previously built images when redeploying
+just helm-status  # Inspect deployment, pods, and services
+helm uninstall voice-changer  # Remove the Helm release when finished
 ```
 
 ### Individual Services

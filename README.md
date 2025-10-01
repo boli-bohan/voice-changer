@@ -22,7 +22,7 @@ This project implements a push-to-talk voice changer where users can:
 - [Just](https://github.com/casey/just) (Command runner)
 - go
 - helm
-- k8s
+- kubectl
 - minikube
 
 ## Quick Start
@@ -62,7 +62,7 @@ For production-like deployments, you can run the application in Kubernetes using
 ### Deploy with Helm
 
 ```bash
-just helm-install  # Build images and install Helm chart
+just helm  # Build images and install Helm chart
 ```
 
 This will:
@@ -74,24 +74,17 @@ This will:
 ### Access the Application
 
 Services are exposed via NodePort:
-- **Frontend**: `http://$(minikube ip):30000`
-- **API Server**: `http://$(minikube ip):30900`
-- **Worker**: `http://$(minikube ip):30901`
-
-Alternatively, use port-forwarding for localhost access:
-```bash
-kubectl port-forward svc/voice-changer-api 9000:8000
-kubectl port-forward svc/voice-changer-worker 9001:8001
-kubectl port-forward svc/voice-changer-frontend 3000:80
-```
+- **Frontend**: `http://$(minikube ip):3000`
+- **API Server**: `http://$(minikube ip):9000`
+- **Worker**: `http://$(minikube ip):9001`
 
 ### Helm Management
 
 ```bash
-just helm-status      # Check deployment status
-just helm-upgrade     # Apply configuration changes
-just helm-template    # Preview rendered templates
-just helm-uninstall   # Remove deployment
+just helm            # Rebuild images (unless SKIP_BUILD_IMAGES=1) and upgrade the release
+SKIP_BUILD_IMAGES=1 just helm  # Upgrade without rebuilding images
+just helm-status     # Check deployment status
+helm uninstall voice-changer  # Remove the release manually when finished
 ```
 
 ### Configuration

@@ -53,8 +53,6 @@ class DurationLoggingTrack(MediaStreamTrack):
 
     async def recv(self) -> AudioFrame:  # type: ignore[override]
         frame = await self._source.recv()
-        assert isinstance(frame, AudioFrame)
-
         samples = getattr(frame, "samples", None)
         if samples is None:
             array = frame.to_ndarray()

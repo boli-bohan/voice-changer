@@ -17,6 +17,34 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
   const [errorMessage, setErrorMessage] = useState('')
   const [isPointerActive, setIsPointerActive] = useState(false)
 
+  const defaultApiBaseUrl = (() => {
+    const envBase = typeof import.meta !== 'undefined' && (import.meta as any).env
+      ? (import.meta as any).env.VITE_API_BASE as string | undefined
+      : undefined
+
+    if (envBase && envBase.length > 0) {
+      return envBase
+    }
+
+    if (typeof window !== 'undefined') {
+      const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:'
+      const host = window.location.hostname
+      const port = window.location.port
+
+      if (port === '3000') {
+        return `${protocol}//${host}:9000`
+      }
+
+      if (port === '5173') {
+        return `${protocol}//${host}:8000`
+      }
+
+      return `${protocol}//${host}:8000`
+    }
+
+    return 'http://localhost:8000'
+  })()
+
   const {
     connect,
     disconnect,
@@ -25,7 +53,7 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
     connectionState,
     isConnected,
   } = useWebRTC({
-    apiBaseUrl: 'http://localhost:8000',
+    apiBaseUrl: defaultApiBaseUrl,
     onStatusChange: onConnectionStatusChange,
     onError: useCallback((error: string) => {
       setAppState('idle')

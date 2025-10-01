@@ -11,7 +11,7 @@ if ! command -v docker &> /dev/null; then
     echo "❌ Docker command not found. Please:"
     echo "   1. Open Docker Desktop from /Applications/Docker.app"
     echo "   2. Wait for it to start (check menu bar icon)"
-    echo "   3. Run 'just k8s' again"
+    echo "   3. Run 'just helm' again"
     exit 1
 fi
 
@@ -20,7 +20,7 @@ if ! docker info &> /dev/null; then
     echo "❌ Docker daemon is not running. Please:"
     echo "   1. Open Docker Desktop from /Applications/Docker.app"
     echo "   2. Wait for it to start (check menu bar icon)"
-    echo "   3. Run 'just k8s' again"
+    echo "   3. Run 'just helm' again"
     exit 1
 fi
 

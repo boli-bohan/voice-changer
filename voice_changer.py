@@ -313,4 +313,4 @@ if __name__ == "__main__":
     import uvicorn
 
     logger.info("🚀 Starting Voice Changer WebRTC Worker Service")
-    uvicorn.run("voice_changer:app", host="127.0.0.1", port=8001, log_level="info")
+    uvicorn.run("voice_changer:app", host="127.0.0.1", port=SETTINGS.worker_port, log_level="info")

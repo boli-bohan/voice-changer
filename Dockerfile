@@ -21,11 +21,11 @@ COPY pyproject.toml uv.lock ./
 # Install dependencies using uv
 RUN uv sync --frozen --no-dev
 
-# Copy application code
-COPY voice_changer.py ./
+# Copy application code and helper modules
+COPY voice_changer.py duration_track.py worker.py ./
 
 # Expose worker port
 EXPOSE 8001
 
 # Run the FastAPI application
-CMD ["uv", "run", "uvicorn", "voice_changer:app", "--host", "0.0.0.0", "--port", "8001"]
+CMD ["sh", "-c", "uv run uvicorn voice_changer:app --host 0.0.0.0 --port ${WORKER_PORT:-8001}"]

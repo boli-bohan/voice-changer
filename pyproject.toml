@@ -19,18 +19,11 @@ dependencies = [
     "soundfile>=0.12",
     "numpy>=1.26",
     "scipy>=1.11",
-]
-
-[project.optional-dependencies]
-dev = [
     # Linting and testing
     "ruff>=0.1.14",
     "pytest>=7.4",
     "pytest-asyncio>=0.21",
-    # Test client dependencies (heavy ML libs)
     "typer>=0.9",
-    "torch>=2.0",
-    "torchaudio>=2.0",
     # Browser testing
     "playwright>=1.44",
     # Optional utilities (not needed for core worker)

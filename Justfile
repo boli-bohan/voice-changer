@@ -46,7 +46,7 @@ up:
 	@bash -c ' \
 		trap "echo \"\" && echo \"Stopping services...\" && just down && exit" INT TERM; \
 		cd api && go run . 2>&1 | sed "s/^/[API] /" & \
-		API_URL=http://127.0.0.1:8000 uv run uvicorn voice_changer:app --reload --host 127.0.0.1 --port 8001 --log-level info 2>&1 | sed "s/^/[WORKER] /" & \
+		API_URL=http://127.0.0.1:8000 WORKER_PORT=8001 uv run uvicorn voice_changer:app --reload --host 127.0.0.1 --port 8001 --log-level info 2>&1 | sed "s/^/[WORKER] /" & \
 		cd frontend && npm run dev 2>&1 | sed "s/^/[FRONTEND] /" \
 	'
 
@@ -65,7 +65,7 @@ up-echo:
 	@bash -c ' \
 		trap "echo \"\" && echo \"Stopping services...\" && just down && exit" INT TERM; \
 		cd api && go run . 2>&1 | sed "s/^/[API] /" & \
-		API_URL=http://127.0.0.1:8000 uv run uvicorn echo:app --reload --host 127.0.0.1 --port 8001 --log-level info 2>&1 | sed "s/^/[ECHO] /" & \
+		API_URL=http://127.0.0.1:8000 WORKER_PORT=8001 uv run uvicorn echo:app --reload --host 127.0.0.1 --port 8001 --log-level info 2>&1 | sed "s/^/[ECHO] /" & \
 		cd frontend && npm run dev 2>&1 | sed "s/^/[FRONTEND] /" \
 	'
 
@@ -79,9 +79,9 @@ down:
 	@pkill -f "[n]pm run dev" 2>/dev/null || true
 	@pkill -f "[v]ite.*--port 5173" 2>/dev/null || true
 	@pkill -f "[v]ite" 2>/dev/null || true
-	@lsof -ti:8000 2>/dev/null | xargs -r kill 2>/dev/null || true
-	@lsof -ti:8001 2>/dev/null | xargs -r kill 2>/dev/null || true
-	@lsof -ti:5173 2>/dev/null | xargs -r kill 2>/dev/null || true
+	@lsof -ti:8000 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+	@lsof -ti:8001 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+	@lsof -ti:5173 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 	@echo "Services stopped"
 
 status:
@@ -99,7 +99,7 @@ status:
 worker:
 	@echo "Starting Voice Changer PCM Worker only..."
 	@echo "Worker will be available at http://127.0.0.1:8001"
-	API_URL=http://127.0.0.1:8000 uv run uvicorn voice_changer:app --reload --host 127.0.0.1 --port 8001 --log-level info
+	API_URL=http://127.0.0.1:8000 WORKER_PORT=8001 uv run uvicorn voice_changer:app --reload --host 127.0.0.1 --port 8001 --log-level info
 
 api:
 	@echo "Starting Go API Server only..."
@@ -127,154 +127,51 @@ test-browser *args:
         uv run python test_browser.py {{args}}
 
 # Kubernetes Deployment (alternative to 'just up')
-k8s:
-	@echo "🚀 Starting Kubernetes deployment..."
-	@echo "Checking minikube status..."
-	@minikube status >/dev/null 2>&1 || (echo "Starting minikube..." && minikube start --driver=qemu)
+
+helm:
+	@echo "🚀 Preparing voice-changer Helm deployment..."
+	@driver="${MINIKUBE_DRIVER:-docker}"; \
+		if ! minikube status >/dev/null 2>&1; then \
+			echo "Starting minikube with driver '${driver}' (expanded node port range)..."; \
+			minikube start --driver="${driver}" --extra-config=apiserver.service-node-port-range=1-65535; \
+		fi
 	@echo "✅ Minikube is running"
 	@echo ""
-	@echo "Building Docker images in minikube..."
-	@./scripts/build-images.sh
-	@echo ""
-	@echo "Applying Kubernetes manifests..."
-	kubectl apply -f k8s/
-	@echo ""
-	@echo "Waiting for pods to be ready..."
-	kubectl wait --for=condition=ready pod -l app=voice-changer --timeout=120s
-	@echo ""
-	@echo "✅ Deployment complete!"
-	@echo ""
-	@echo "📊 Status:"
-	@kubectl get pods -l app=voice-changer
-	@echo ""
-	@echo "🌐 Access URLs (via NodePort):"
-	@echo "  API Server: http://$$(minikube ip):30900"
-	@echo "  Worker:     http://$$(minikube ip):30901"
-	@echo "  Frontend:   http://$$(minikube ip):30000"
-	@echo ""
-	@echo "💡 To access via localhost, run in separate terminals:"
-	@echo "  kubectl port-forward svc/voice-changer-api 9000:8000"
-	@echo "  kubectl port-forward svc/voice-changer-worker 9001:8001"
-	@echo "  kubectl port-forward svc/voice-changer-frontend 3000:80"
-	@echo ""
-	@echo "📝 View logs with: just k8s-logs"
-	@echo "🛑 Stop with: just k8s-down"
-
-k8s-down:
-	@echo "🛑 Stopping Kubernetes deployment..."
-	kubectl delete -f k8s/ || true
-	@echo "✅ Kubernetes resources deleted"
-
-k8s-logs *args:
-	@if [ -z "{{args}}" ]; then \
-		echo "📝 Available pods:"; \
-		kubectl get pods -l app=voice-changer; \
-		echo ""; \
-		echo "Usage: just k8s-logs [pod-name]"; \
-		echo "Or view all logs with: just k8s-logs all"; \
-	elif [ "{{args}}" = "all" ]; then \
-		echo "📝 Logs for all voice-changer pods:"; \
-		for pod in $$(kubectl get pods -l app=voice-changer -o jsonpath='{.items[*].metadata.name}'); do \
-			echo ""; \
-			echo "=== $$pod ==="; \
-			kubectl logs $$pod --tail=50; \
-		done; \
+	@if [ "${SKIP_BUILD_IMAGES:-0}" != "1" ]; then \
+		echo "Building Docker images inside minikube..."; \
+		./scripts/build-images.sh; \
 	else \
-		kubectl logs {{args}} -f; \
+		echo "Skipping image build (SKIP_BUILD_IMAGES=${SKIP_BUILD_IMAGES})"; \
 	fi
+	@echo ""
+	@echo "Installing Helm release..."
+	helm upgrade --install voice-changer helm/voice-changer
+	@echo ""
+	@echo "Waiting for pods to become ready..."
+	kubectl wait --for=condition=ready pod -l app=voice-changer --timeout=180s
+	@echo "✅ Helm deployment complete"
+	@echo ""
+	@echo "🌐 Access services via NodePort:"
+	@echo "  Frontend: http://$$(minikube ip):3000"
+	@echo "  API:      http://$$(minikube ip):9000"
+	@echo "  Worker:   http://$$(minikube ip):9001"
 
-k8s-status:
-	@echo "📊 Kubernetes Status"
+helm-status:
+	@echo "📊 Helm Deployment Status"
 	@echo ""
-	@echo "Cluster:"
-	@minikube status || echo "❌ Minikube is not running"
+	@if ! minikube status >/dev/null 2>&1; then \
+		echo "❌ Minikube is not running"; \
+		exit 0; \
+	fi
+	@helm status voice-changer 2>/dev/null || echo "❌ Helm release 'voice-changer' not found"
 	@echo ""
-	@echo "Deployments:"
-	@kubectl get deployments -l app=voice-changer 2>/dev/null || echo "No deployments found"
+	@echo "Deployments:"; kubectl get deployments -l app=voice-changer 2>/dev/null || echo "No deployments found"
 	@echo ""
-	@echo "Pods:"
-	@kubectl get pods -l app=voice-changer 2>/dev/null || echo "No pods found"
+	@echo "Pods:"; kubectl get pods -l app=voice-changer 2>/dev/null || echo "No pods found"
 	@echo ""
-	@echo "Services:"
-	@kubectl get services -l app=voice-changer 2>/dev/null || echo "No services found"
-	@echo ""
-	@echo "Access URLs (via NodePort):"
-	@echo "  API Server: http://$$(minikube ip):30900" 2>/dev/null || echo "  ❌ Minikube not running"
-	@echo "  Worker:     http://$$(minikube ip):30901" 2>/dev/null || echo "  ❌ Minikube not running"
-	@echo "  Frontend:   http://$$(minikube ip):30000" 2>/dev/null || echo "  ❌ Minikube not running"
-
-k8s-rebuild component:
-	@echo "🔄 Rebuilding {{component}}..."
-	@bash -c 'eval $$(minikube -p minikube docker-env) && \
-		if [ "{{component}}" = "api" ]; then \
-			docker build -t voice-changer-api:latest -f api/Dockerfile api/ && \
-			kubectl rollout restart deployment/voice-changer-api; \
-		elif [ "{{component}}" = "worker" ]; then \
-			docker build -t voice-changer-worker:latest -f Dockerfile . && \
-			kubectl rollout restart deployment/voice-changer-worker; \
-		elif [ "{{component}}" = "frontend" ]; then \
-			docker build -t voice-changer-frontend:latest -f frontend/Dockerfile frontend/ && \
-			kubectl rollout restart deployment/voice-changer-frontend; \
-		else \
-			echo "❌ Unknown component: {{component}}"; \
-			echo "Valid components: api, worker, frontend"; \
-			exit 1; \
-		fi'
-	@echo "✅ {{component}} rebuild complete"
-
-# Helm Deployment (alternative to 'kubectl apply -f k8s/')
-helm-install:
-        @echo "🚀 Installing voice-changer Helm chart..."
-        @echo "Checking minikube status..."
-        @driver="${MINIKUBE_DRIVER:-docker}"; \
-                if ! minikube status >/dev/null 2>&1; then \
-                        echo "Starting minikube with driver '${driver}'..."; \
-                        minikube start --driver="${driver}"; \
-                fi
-        @echo "✅ Minikube is running"
-        @if [ "${SKIP_BUILD_IMAGES:-0}" != "1" ]; then \
-                echo ""; \
-                echo "Building Docker images in minikube..."; \
-                ./scripts/build-images.sh; \
-        else \
-                echo ""; \
-                echo "Skipping Docker image build (SKIP_BUILD_IMAGES=${SKIP_BUILD_IMAGES:-})"; \
-        fi
-        @echo ""
-        @echo "Installing Helm chart..."
-        helm install voice-changer helm/voice-changer
-        @echo ""
-        @echo "Waiting for pods to be ready..."
-        kubectl wait --for=condition=ready pod -l app=voice-changer --timeout=120s
-        @echo ""
-
-helm-upgrade:
-	@echo "🔄 Upgrading voice-changer Helm release..."
-	helm upgrade voice-changer helm/voice-changer
-	@echo ""
-	@echo "Waiting for pods to be ready..."
-	kubectl wait --for=condition=ready pod -l app=voice-changer --timeout=120s
-	@echo "✅ Upgrade complete!"
+	@echo "Services:"; kubectl get services -l app=voice-changer 2>/dev/null || echo "No services found"
 
 helm-uninstall:
 	@echo "🛑 Uninstalling voice-changer Helm release..."
-	helm uninstall voice-changer || true
-	@echo "✅ Helm release uninstalled"
-
-helm-template:
-	@echo "📝 Rendering Helm templates..."
-	helm template voice-changer helm/voice-changer
-
-helm-status:
-	@echo "📊 Helm Release Status"
-	@echo ""
-	@helm status voice-changer 2>/dev/null || echo "❌ Helm release 'voice-changer' not found"
-	@echo ""
-	@echo "Deployments:"
-	@kubectl get deployments -l app=voice-changer 2>/dev/null || echo "No deployments found"
-	@echo ""
-	@echo "Pods:"
-	@kubectl get pods -l app=voice-changer 2>/dev/null || echo "No pods found"
-	@echo ""
-	@echo "Services:"
-	@kubectl get services -l app=voice-changer 2>/dev/null || echo "No services found"
+	helm uninstall voice-changer || echo "Release not found"
+	@echo "✅ Helm release removed"
