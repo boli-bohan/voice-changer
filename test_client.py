@@ -212,11 +212,7 @@ class VoiceChangerWebRTCTestClient:
         max_duration = input_duration + 1.0
 
         self.pc = RTCPeerConnection()
-        self.player = MediaPlayer(
-            str(input_path),
-            format="wav",
-            options={"sample_rate": str(PCM_SAMPLE_RATE)},
-        )
+        self.player = MediaPlayer(str(input_path))
 
         if not self.player.audio:
             raise RuntimeError("Input file does not contain an audio track")
