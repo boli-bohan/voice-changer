@@ -19,7 +19,7 @@ from aiortc.mediastreams import MediaStreamTrack
 from av import AudioFrame
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -37,7 +37,11 @@ MAX_CONNECTIONS = 4
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialize worker and start background tasks on application startup."""
+    """Initialize worker and start background tasks on application startup.
+
+    Args:
+        app: FastAPI application instance managed by the lifespan context.
+    """
     asyncio.create_task(heartbeat_loop())
     logger.info("✅ Worker initialized: id=%s url=%s", WORKER_ID, WORKER_URL)
     yield
@@ -60,8 +64,8 @@ app.add_middleware(
 class SDPModel(BaseModel):
     """Pydantic model representing a WebRTC SDP payload."""
 
-    sdp: str
-    type: str
+    sdp: str = Field(description="Session description protocol body provided by the browser.")
+    type: str = Field(description="SDP type such as 'offer' or 'answer'.")
 
 
 TARGET_SAMPLE_RATE = 48_000
@@ -74,6 +78,12 @@ class PitchShiftTrack(MediaStreamTrack):
     kind = "audio"
 
     def __init__(self, source: MediaStreamTrack, pitch_shift_semitones: float = DEFAULT_PITCH_SHIFT):
+        """Initialize the track wrapper that performs pitch shifting on audio frames.
+
+        Args:
+            source: Upstream media track supplying PCM audio frames.
+            pitch_shift_semitones: Number of semitones to shift the audio signal.
+        """
         super().__init__()
         self._source = source
         self._pitch_shift = pitch_shift_semitones
@@ -84,6 +94,11 @@ class PitchShiftTrack(MediaStreamTrack):
         self._last_output_rate = TARGET_SAMPLE_RATE
 
     async def recv(self) -> AudioFrame:
+        """Receive, transform, and return the next audio frame from the source.
+
+        Returns:
+            Audio frame with the configured pitch shift applied.
+        """
         frame = await self._source.recv()
         self._frame_count += 1
 
@@ -170,6 +185,13 @@ class PitchShiftTrack(MediaStreamTrack):
         return out_frame
 
     def _log_progress(self, direction: str, total_samples: int, sample_rate: int) -> None:
+        """Emit structured logs describing audio throughput.
+
+        Args:
+            direction: Indicates whether logging covers received or sent samples.
+            total_samples: Aggregate sample count processed to date.
+            sample_rate: Sample rate used when converting to seconds of audio.
+        """
         if not sample_rate or total_samples <= 0:
             return
         duration = total_samples / float(sample_rate)
@@ -186,13 +208,21 @@ active_peers: set[RTCPeerConnection] = set()
 
 
 async def _wait_for_ice_completion(pc: RTCPeerConnection) -> None:
-    """Poll until ICE gathering completes for the provided connection."""
+    """Poll until ICE gathering completes for the provided connection.
+
+    Args:
+        pc: Connection whose ICE gathering state should reach completion.
+    """
     while pc.iceGatheringState != "complete":
         await asyncio.sleep(0.05)
 
 
 async def _cleanup_peer(pc: RTCPeerConnection) -> None:
-    """Remove a peer from the active set and close its connection."""
+    """Remove a peer from the active set and close its connection.
+
+    Args:
+        pc: Connection that should be cleaned up and closed.
+    """
     if pc in active_peers:
         active_peers.remove(pc)
     await pc.close()
@@ -200,11 +230,7 @@ async def _cleanup_peer(pc: RTCPeerConnection) -> None:
 
 
 async def heartbeat_loop() -> None:
-    """Periodically send heartbeat to API server with current capacity information.
-
-    This allows the API server to maintain an up-to-date registry of available
-    workers and their connection counts for load balancing.
-    """
+    """Send periodic heartbeats so the API can track worker capacity."""
     logger.info(
         "🫀 Starting heartbeat loop to %s (worker_id=%s, worker_url=%s)",
         API_URL,
@@ -239,7 +265,7 @@ async def get_status() -> dict[str, str]:
     """Return a simple readiness response for health probes.
 
     Returns:
-        dict[str, str]: Service identifier and status metadata.
+        Service identifier and status metadata.
     """
     return {"status": "running", "service": "voice_changer_webrtc_worker", "version": "3.0.0"}
 
@@ -249,7 +275,7 @@ async def health_check() -> dict[str, object]:
     """Report the current health state and connection metrics.
 
     Returns:
-        dict[str, object]: Details about service status and active peers.
+        Details about service status and active peers.
     """
     return {
         "status": "healthy",
@@ -265,7 +291,7 @@ async def get_capacity() -> dict[str, object]:
     """Return current worker capacity and availability information.
 
     Returns:
-        dict[str, object]: Worker identification, load, and availability status.
+        Worker identification, load, and availability status.
     """
     return {
         "worker_id": WORKER_ID,
@@ -284,7 +310,7 @@ async def handle_offer(payload: SDPModel) -> dict[str, str]:
         payload: The SDP model supplied by the signalling API.
 
     Returns:
-        dict[str, str]: The generated SDP answer describing the worker session.
+        The generated SDP answer describing the worker session.
     """
 
     pc = RTCPeerConnection()
@@ -302,7 +328,11 @@ async def handle_offer(payload: SDPModel) -> dict[str, str]:
 
     @pc.on("track")
     async def on_track(track: MediaStreamTrack) -> None:
-        """Handle incoming audio tracks by applying pitch shifting."""
+        """Handle incoming audio tracks by applying pitch shifting.
+
+        Args:
+            track: Remote track received from the signalling peer.
+        """
         logger.info("🎙️ Incoming track: %s", track.kind)
         if track.kind == "audio":
             transformed = PitchShiftTrack(track)

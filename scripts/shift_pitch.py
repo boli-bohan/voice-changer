@@ -34,12 +34,12 @@ def shift_pitch(input_file: str, output_file: str, pitch_shift_semitones: float 
     """Apply a pitch shift to the provided audio file.
 
     Args:
-        input_file (str): Path to the input audio file.
-        output_file (str): Destination path for the processed audio file.
-        pitch_shift_semitones (float): Number of semitones to shift the pitch.
+        input_file: Path to the input audio file.
+        output_file: Destination path for the processed audio file.
+        pitch_shift_semitones: Number of semitones to shift the pitch.
 
     Returns:
-        bool: ``True`` if processing succeeds, ``False`` otherwise.
+        ``True`` if processing succeeds, ``False`` otherwise.
     """
     try:
         logger.info(f"Loading audio from: {input_file}")

@@ -52,7 +52,7 @@ def fastapi_app():
     """Create the ASGI application served by Modal.
 
     Returns:
-        FastAPI: The Voice Changer application defined in ``voice_changer.py``.
+        The Voice Changer application defined in ``voice_changer.py``.
     """
     # Import the existing FastAPI app from voice_changer.py
     from voice_changer import app as voice_changer_app
