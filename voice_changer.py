@@ -1,26 +1,19 @@
 #!/usr/bin/env python3
-"""
-Voice Changer Worker Service powered by WebRTC streaming.
-
-This service accepts WebRTC peer connections, applies a pitch shift to
-incoming audio in real time, and streams the transformed audio back to the
-client. The HTTP API exposes an SDP offer endpoint that can be used by a
-signalling service (the Go API) to negotiate connections.
-"""
+"""Voice changer worker that pitch-shifts PCM audio frames over WebRTC."""
 
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import os
 import uuid
-import wave
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import httpx
 import librosa
 import numpy as np
+import soundfile as sf
 from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.mediastreams import MediaStreamTrack
 from av import AudioFrame
@@ -30,6 +23,9 @@ from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+for noisy_logger in ("httpx", "httpcore"):
+    logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
 # Worker configuration for heartbeat and load balancing
 WORKER_ID = os.environ.get("HOSTNAME", str(uuid.uuid4()))
@@ -69,264 +65,121 @@ class SDPModel(BaseModel):
 
 
 TARGET_SAMPLE_RATE = 48_000
-TARGET_CHANNELS = 1
+DEFAULT_PITCH_SHIFT = 4.0
 
 
 class PitchShiftTrack(MediaStreamTrack):
-    """Wraps an audio track and applies a pitch shift to buffered frames."""
+    """Forward PCM frames while applying a pitch shift when requested."""
 
     kind = "audio"
 
-    def __init__(self, source: MediaStreamTrack, pitch_shift_semitones: float = 0.0):
-        """Initialise a processing track that applies a pitch shift.
-
-        Args:
-            source: Incoming audio track from the remote peer.
-            pitch_shift_semitones: Number of semitones to shift the pitch.
-        """
+    def __init__(self, source: MediaStreamTrack, pitch_shift_semitones: float = DEFAULT_PITCH_SHIFT):
         super().__init__()
         self._source = source
         self._pitch_shift = pitch_shift_semitones
-
-        # Buffer configuration for overlap-add smoothing.
-        self._chunk_size = 4096
-        self._overlap = 1024
-        self._step_size = max(1, self._chunk_size - self._overlap)
-        self._n_fft = 2048
-        self._hop_length = 512
-        self._input_buffer = np.empty(0, dtype=np.float32)
-        self._output_queue: list[np.ndarray] = []
-        self._output_available = 0
-        self._prev_tail: np.ndarray | None = None
-        if self._overlap > 0:
-            self._fade_in = np.linspace(0.0, 1.0, self._overlap, dtype=np.float32)
-            self._fade_out = 1.0 - self._fade_in
-        else:
-            self._fade_in = self._fade_out = None
-
-        # Optional debug audio capture to inspect input/output pairs offline.
-        self._debug_dir = Path(f"/tmp/audio/{WORKER_ID}")
-        self._debug_dir.mkdir(parents=True, exist_ok=True)
-        self._input_wav_path = self._debug_dir / "input.wav"
-        self._output_wav_path = self._debug_dir / "output.wav"
-        self._input_wav = wave.open(str(self._input_wav_path), "wb")
-        self._input_wav.setnchannels(TARGET_CHANNELS)
-        self._input_wav.setsampwidth(2)
-        self._input_wav.setframerate(TARGET_SAMPLE_RATE)
-        self._output_wav = wave.open(str(self._output_wav_path), "wb")
-        self._output_wav.setnchannels(TARGET_CHANNELS)
-        self._output_wav.setsampwidth(2)
-        self._output_wav.setframerate(TARGET_SAMPLE_RATE)
-        logger.info("🎙️ Debug audio streaming enabled: %s", self._debug_dir)
-
-        # Debug counters
-        self._total_input_samples = 0
-        self._total_output_samples = 0
         self._frame_count = 0
+        self._input_samples_total = 0
+        self._output_samples_total = 0
+        self._last_input_rate = TARGET_SAMPLE_RATE
+        self._last_output_rate = TARGET_SAMPLE_RATE
 
     async def recv(self) -> AudioFrame:
-        """Receive an audio frame, shift its pitch, and emit the result."""
         frame = await self._source.recv()
         self._frame_count += 1
 
-        if frame.sample_rate and frame.sample_rate != TARGET_SAMPLE_RATE:
-            logger.warning(
-                "⚠️ Sample rate mismatch! Incoming=%d Hz, Expected=%d Hz",
-                frame.sample_rate,
-                TARGET_SAMPLE_RATE,
-            )
+        sample_rate = frame.sample_rate or TARGET_SAMPLE_RATE
+        format_name = frame.format.name
+        layout_name = frame.layout.name
 
-        samples = frame.to_ndarray()
-        mono = self._to_mono_float(samples)
-        frame_length = mono.shape[0]
+        pcm = frame.to_ndarray()
+        audio_data = np.asarray(pcm, dtype=np.int16)
+        if audio_data.size == 0 or abs(self._pitch_shift) < 1e-6:
+            return frame
 
-        # Log frame details periodically
+        if audio_data.ndim == 1:
+            data_for_io = audio_data
+            frame_samples = audio_data.shape[0]
+        else:
+            data_for_io = audio_data.transpose(1, 0)
+            frame_samples = audio_data.shape[1]
+
+        self._last_input_rate = sample_rate
+        self._input_samples_total += frame_samples
+        self._log_progress("recv", self._input_samples_total, self._last_input_rate)
+
         if self._frame_count % 100 == 1:
             logger.info(
-                "📊 Frame #%d: samples.shape=%s, mono.shape=%s, frame.sample_rate=%s, frame_length=%d",
+                "📊 Processing frame #%d: sample_rate=%s format=%s layout=%s pitch_shift=%.2f",
                 self._frame_count,
-                samples.shape,
-                mono.shape,
-                frame.sample_rate,
-                frame_length,
+                sample_rate,
+                format_name,
+                layout_name,
+                self._pitch_shift,
             )
 
-        if frame_length:
-            self._input_buffer = np.concatenate((self._input_buffer, mono))
+        with io.BytesIO() as buffer:
+            sf.write(
+                buffer,
+                np.ascontiguousarray(data_for_io),
+                sample_rate,
+                subtype="PCM_16",
+                format="WAV",
+            )
+            buffer.seek(0)
+            float_samples, loaded_sr = librosa.load(
+                buffer,
+                sr=sample_rate,
+                mono=False,
+            )
 
-        input_pcm16 = (np.clip(mono, -1.0, 1.0) * 32767.0).astype(np.int16)
-        if input_pcm16.size:
-            self._input_wav.writeframes(input_pcm16.tobytes())
-            self._total_input_samples += input_pcm16.size
+        if float_samples.ndim == 1:
+            float_samples = float_samples[np.newaxis, :]
 
-        self._ensure_output(frame_length)
-        processed = self._consume_output(frame_length)
+        try:
+            shifted_channels: list[np.ndarray] = []
+            for channel in range(float_samples.shape[0]):
+                channel_shifted = librosa.effects.pitch_shift(
+                    float_samples[channel],
+                    sr=loaded_sr,
+                    n_steps=self._pitch_shift,
+                )
+                channel_shifted = librosa.util.fix_length(channel_shifted, size=frame_samples)
+                shifted_channels.append(channel_shifted.astype(np.float32))
+            shifted = np.stack(shifted_channels, axis=0)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.error("Pitch shifting error: %s", exc)
+            return frame
 
-        pcm = np.clip(processed, -1.0, 1.0)
-        pcm16 = (pcm * 32767.0).astype(np.int16)
-        if pcm16.size:
-            self._output_wav.writeframes(pcm16.tobytes())
-            self._total_output_samples += pcm16.size
+        shifted = np.clip(shifted, -1.0, 1.0)
+        shifted_pcm = (shifted * 32767.0).astype(np.int16)
 
-        array = pcm16[np.newaxis, :]
-        out_frame = AudioFrame.from_ndarray(array, format="s16", layout="mono")
-        out_frame.sample_rate = TARGET_SAMPLE_RATE
+        if shifted_pcm.ndim == 1:
+            array = shifted_pcm[np.newaxis, :]
+        else:
+            array = shifted_pcm
+
+        out_frame = AudioFrame.from_ndarray(np.ascontiguousarray(array), format=format_name, layout=layout_name)
+        out_frame.sample_rate = loaded_sr
         out_frame.pts = frame.pts
         out_frame.time_base = frame.time_base
+
+        self._last_output_rate = loaded_sr
+        self._output_samples_total += frame_samples
+        self._log_progress("send", self._output_samples_total, self._last_output_rate)
+
         return out_frame
 
-    def close_debug_files(self) -> None:
-        """Close debug WAV files and log the saved file paths."""
-        try:
-            self._input_wav.close()
-            self._output_wav.close()
-
-            input_duration = self._total_input_samples / TARGET_SAMPLE_RATE
-            output_duration = self._total_output_samples / TARGET_SAMPLE_RATE
-
-            logger.info(
-                "💾 Debug audio saved:\n"
-                "   Input:  %s (%.2fs, %d samples, %d frames)\n"
-                "   Output: %s (%.2fs, %d samples)",
-                self._input_wav_path,
-                input_duration,
-                self._total_input_samples,
-                self._frame_count,
-                self._output_wav_path,
-                output_duration,
-                self._total_output_samples,
-            )
-        except Exception as exc:
-            logger.warning("⚠️ Error closing debug WAV files: %s", exc)
-
-    def _to_mono_float(self, samples: np.ndarray) -> np.ndarray:
-        if samples.ndim == 1:
-            mono = samples.astype(np.float32, copy=False)
-        else:
-            mono = samples[0].astype(np.float32, copy=False)
-
-        if np.issubdtype(samples.dtype, np.integer):
-            info = np.iinfo(samples.dtype)
-            denom = float(max(abs(info.min), info.max)) or 1.0
-            mono = mono / denom
-        elif np.issubdtype(samples.dtype, np.floating):
-            pass
-        else:  # pragma: no cover - defensive fallback
-            logger.warning(
-                "Unsupported sample dtype %s; normalising via peak amplitude", samples.dtype
-            )
-            peak = float(np.max(np.abs(mono))) or 1.0
-            mono = mono / peak
-
-        return np.clip(mono, -1.0, 1.0)
-
-    def _append_output(self, chunk: np.ndarray) -> None:
-        if chunk.size == 0:
+    def _log_progress(self, direction: str, total_samples: int, sample_rate: int) -> None:
+        if not sample_rate or total_samples <= 0:
             return
-        self._output_queue.append(chunk.astype(np.float32, copy=False))
-        self._output_available += chunk.size
-
-    def _consume_output(self, count: int) -> np.ndarray:
-        if count <= 0:
-            return np.empty(0, dtype=np.float32)
-
-        out = np.zeros(count, dtype=np.float32)
-        idx = 0
-        remaining = count
-        while remaining > 0 and self._output_queue:
-            head = self._output_queue[0]
-            take = min(head.size, remaining)
-            out[idx : idx + take] = head[:take]
-            if take == head.size:
-                self._output_queue.pop(0)
-            else:
-                self._output_queue[0] = head[take:]
-            idx += take
-            remaining -= take
-
-        consumed = count - remaining
-        self._output_available = max(self._output_available - consumed, 0)
-        return out
-
-    def _ensure_output(self, required: int) -> None:
-        if required <= 0:
-            return
-
-        while self._output_available < required and self._input_buffer.size >= self._chunk_size:
-            chunk = self._input_buffer[: self._chunk_size]
-            self._input_buffer = self._input_buffer[self._step_size :]
-            self._process_chunk(chunk, final=False)
-
-        if self._output_available < required and self._input_buffer.size:
-            chunk = self._input_buffer
-            self._input_buffer = np.empty(0, dtype=np.float32)
-            self._process_chunk(chunk, final=True)
-
-    def _process_chunk(self, chunk: np.ndarray, final: bool) -> None:
-        if chunk.size == 0:
-            return
-
-        if chunk.size < 2:
-            shifted = chunk
-        else:
-            try:
-                shifted = librosa.effects.pitch_shift(
-                    chunk,
-                    sr=TARGET_SAMPLE_RATE,
-                    n_steps=self._pitch_shift,
-                    n_fft=self._n_fft,
-                    hop_length=self._hop_length,
-                )
-            except Exception as exc:  # pragma: no cover - defensive logging
-                logger.error("Pitch shifting error: %s", exc)
-                shifted = chunk
-
-        self._emit_shifted_chunk(np.asarray(shifted, dtype=np.float32), final)
-
-    def _emit_shifted_chunk(self, shifted: np.ndarray, final: bool) -> None:
-        if shifted.size == 0:
-            return
-
-        if self._overlap <= 0:
-            if self._prev_tail is not None:
-                self._append_output(self._prev_tail)
-                self._prev_tail = None
-            self._append_output(shifted)
-            return
-
-        if shifted.size <= self._overlap:
-            if self._prev_tail is not None:
-                fade_len = min(self._prev_tail.size, shifted.size)
-                cross = (
-                    self._prev_tail[:fade_len] * self._fade_out[:fade_len]
-                    + shifted[:fade_len] * self._fade_in[:fade_len]
-                )
-                self._append_output(cross)
-                remainder = shifted[fade_len:]
-                if remainder.size:
-                    self._append_output(remainder)
-                self._prev_tail = None
-            else:
-                self._append_output(shifted)
-            return
-
-        head = shifted[: self._overlap]
-        body = shifted[self._overlap : -self._overlap]
-        tail = shifted[-self._overlap :]
-
-        if self._prev_tail is None:
-            self._append_output(shifted[: -self._overlap])
-        else:
-            cross = self._prev_tail * self._fade_out + head * self._fade_in
-            self._append_output(cross)
-            if body.size:
-                self._append_output(body)
-
-        if final:
-            self._append_output(tail)
-            self._prev_tail = None
-        else:
-            self._prev_tail = tail.copy()
+        duration = total_samples / float(sample_rate)
+        logger.info(
+            "🎚️ Worker %s cumulative duration: %.3f s (samples=%d, rate=%d)",
+            direction,
+            duration,
+            total_samples,
+            sample_rate,
+        )
 
 
 active_peers: set[RTCPeerConnection] = set()
@@ -449,7 +302,7 @@ async def handle_offer(payload: SDPModel) -> dict[str, str]:
 
     @pc.on("track")
     async def on_track(track: MediaStreamTrack) -> None:
-        """Handle incoming tracks by applying pitch shifting to audio streams."""
+        """Handle incoming audio tracks by applying pitch shifting."""
         logger.info("🎙️ Incoming track: %s", track.kind)
         if track.kind == "audio":
             transformed = PitchShiftTrack(track)
@@ -460,7 +313,6 @@ async def handle_offer(payload: SDPModel) -> dict[str, str]:
             async def on_track_ended() -> None:
                 """Log track completion and dispose of the peer connection."""
                 logger.info("🏁 Audio track ended")
-                transformed.close_debug_files()
                 await _cleanup_peer(pc)
 
     offer = RTCSessionDescription(sdp=payload.sdp, type=payload.type)

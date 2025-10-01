@@ -20,6 +20,10 @@ from pydantic import BaseModel
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+# Reduce verbose heartbeat request logs from httpx while preserving warnings.
+for noisy_logger in ("httpx", "httpcore"):
+    logging.getLogger(noisy_logger).setLevel(logging.WARNING)
+
 # Worker configuration for heartbeat and load balancing
 WORKER_ID = os.environ.get("HOSTNAME", str(uuid.uuid4()))
 WORKER_URL = f"http://{os.environ.get('POD_IP', '127.0.0.1')}:8001"

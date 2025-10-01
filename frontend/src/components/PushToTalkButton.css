@@ -5,6 +5,46 @@
   gap: 2rem;
 }
 
+.connection-controls {
+  display: flex;
+  gap: 1rem;
+}
+
+.connect-button,
+.disconnect-button {
+  min-width: 120px;
+  padding: 0.6rem 1.1rem;
+  border-radius: 999px;
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  font-weight: 600;
+  color: #1f2937;
+  cursor: pointer;
+  transition:
+    transform 0.15s ease,
+    box-shadow 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.connect-button:hover:not(:disabled),
+.disconnect-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: #9ca3af;
+  box-shadow: 0 8px 18px rgba(15, 23, 42, 0.1);
+}
+
+.connect-button:disabled,
+.disconnect-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+  box-shadow: none;
+  transform: none;
+}
+
+.disconnect-button {
+  background: #f9fafb;
+}
+
 .push-to-talk-button {
   width: 200px;
   height: 200px;
@@ -195,6 +235,16 @@
 }
 
 @media (max-width: 768px) {
+  .connection-controls {
+    flex-direction: column;
+    width: 100%;
+  }
+
+  .connect-button,
+  .disconnect-button {
+    width: 100%;
+  }
+
   .push-to-talk-button {
     width: 150px;
     height: 150px;

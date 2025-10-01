@@ -7,23 +7,25 @@ interface PushToTalkButtonProps {
   onAppStateChange?: (state: AppState) => void
 }
 
-export type AppState = 'idle' | 'recording' | 'playing' | 'error'
+export type AppState = 'idle' | 'recording' | 'processing' | 'playing' | 'error'
 
-/**
- * Microphone-style push-to-talk control that orchestrates WebRTC streaming.
- *
- * @param onConnectionStatusChange - Callback invoked when the worker connection state changes.
- * @param onAppStateChange - Optional callback for exposing application state transitions.
- * @returns A button element with streaming status and error messaging.
- */
 const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
   onConnectionStatusChange,
   onAppStateChange,
 }) => {
   const [appState, setAppState] = useState<AppState>('idle')
-  const [errorMessage, setErrorMessage] = useState<string>('')
+  const [errorMessage, setErrorMessage] = useState('')
+  const [isPointerActive, setIsPointerActive] = useState(false)
 
-  const { startStreaming, stopStreaming, connectionState, isStreaming } = useWebRTC({
+  const {
+    connect,
+    disconnect,
+    startTalking,
+    stopTalking,
+    connectionState,
+    isTalking,
+    isConnected,
+  } = useWebRTC({
     apiBaseUrl: 'http://localhost:8000',
     onStatusChange: onConnectionStatusChange,
     onError: useCallback((error: string) => {
@@ -42,97 +44,133 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
     onAppStateChange?.(appState)
   }, [appState, onAppStateChange])
 
-  /**
-   * Initiates audio capture and WebRTC negotiation when the button is pressed.
-   */
-  const handleMouseDown = useCallback(async () => {
-    if (appState !== 'idle') return
+  useEffect(() => {
+    if (connectionState !== 'connected') {
+      setIsPointerActive(false)
+      setAppState('idle')
+    }
+  }, [connectionState])
 
+  useEffect(() => {
+    if (appState === 'error') {
+      setIsPointerActive(false)
+    }
+  }, [appState])
+
+  const handleConnect = useCallback(async () => {
+    setErrorMessage('')
+    setAppState('idle')
     try {
-      setErrorMessage('')
-      setAppState('recording')
-      await startStreaming()
+      await connect()
     } catch (error) {
+      const message = error instanceof Error ? error.message : 'Failed to connect to worker'
       setAppState('error')
-      setErrorMessage(error instanceof Error ? error.message : 'Failed to start streaming')
+      setErrorMessage(message)
     }
-  }, [appState, startStreaming])
+  }, [connect])
 
-  /**
-   * Stops the active WebRTC session and releases associated resources.
-   */
-  const stopSession = useCallback(() => {
-    stopStreaming()
-  }, [stopStreaming])
+  const handleDisconnect = useCallback(() => {
+    disconnect()
+    setIsPointerActive(false)
+    setAppState('idle')
+    setErrorMessage('')
+  }, [disconnect])
 
-  /**
-   * Ends streaming when the button is released if a session is active.
-   */
-  const handleMouseUp = useCallback(() => {
-    if (isStreaming || appState === 'playing' || appState === 'recording') {
-      stopSession()
+  const handlePushToTalkStart = useCallback(() => {
+    if (!isConnected) {
+      setErrorMessage('Connect to the worker before streaming audio.')
+      setAppState('error')
+      return
     }
-  }, [appState, isStreaming, stopSession])
 
-  /**
-   * Ensures streaming stops if the pointer leaves the button mid-press.
-   */
-  const handleMouseLeave = useCallback(() => {
-    if (isStreaming || appState === 'recording') {
-      stopSession()
+    setErrorMessage('')
+    setAppState('recording')
+    setIsPointerActive(true)
+    startTalking()
+  }, [isConnected, startTalking])
+
+  const handlePushToTalkStop = useCallback(() => {
+    if (!isConnected) return
+
+    setIsPointerActive(false)
+    if (isTalking) {
+      setAppState('processing')
     }
-  }, [appState, isStreaming, stopSession])
+    stopTalking()
+  }, [isConnected, isTalking, stopTalking])
 
-  /**
-   * Clears error state and resets the component to idle.
-   */
   const handleReset = useCallback(() => {
     setAppState('idle')
     setErrorMessage('')
-    stopStreaming()
-  }, [stopStreaming])
+    setIsPointerActive(false)
+  }, [])
 
-  /**
-   * Computes the button label based on application and connection state.
-   *
-   * @returns A descriptive label for the current interaction state.
-   */
   const getButtonText = () => {
     switch (appState) {
       case 'idle':
-        return connectionState === 'connected' ? 'Press & Hold to Speak' : 'Press to Connect'
+        return isConnected ? 'Hold to speak' : 'Connect first to begin'
       case 'recording':
         return 'Streaming voice… release to stop'
+      case 'processing':
+        return 'Processing response…'
       case 'playing':
-        return 'Listening to transformed audio…'
+        return 'Playing transformed audio'
       case 'error':
         return 'Error occurred'
       default:
-        return 'Press & Hold to Speak'
+        return 'Hold to speak'
     }
   }
 
-  /**
-   * Builds the CSS class list describing the current button state.
-   *
-   * @returns Space-separated CSS class names for styling.
-   */
   const getButtonClass = () => {
     const states = [appState]
-    if (isStreaming) {
+    if (isPointerActive) {
       states.push('recording')
+    }
+    if (appState === 'processing') {
+      states.push('processing')
+    }
+    if (appState === 'playing') {
+      states.push('playing')
     }
     return `push-to-talk-button ${states.join(' ')}`
   }
 
   return (
     <div className="push-to-talk-container">
+      <div className="connection-controls">
+        <button
+          type="button"
+          className="connect-button"
+          onClick={handleConnect}
+          disabled={connectionState === 'connecting' || isConnected}
+        >
+          {connectionState === 'connecting' ? 'Connecting…' : 'Connect'}
+        </button>
+        <button
+          type="button"
+          className="disconnect-button"
+          onClick={handleDisconnect}
+          disabled={connectionState !== 'connected'}
+        >
+          Disconnect
+        </button>
+      </div>
+
       <button
         className={getButtonClass()}
-        onMouseDown={handleMouseDown}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseLeave}
-        disabled={appState === 'error'}
+        onPointerDown={(event) => {
+          if (event.button !== undefined && event.button !== 0) return
+          handlePushToTalkStart()
+        }}
+        onPointerUp={handlePushToTalkStop}
+        onPointerLeave={() => {
+          if (isPointerActive) {
+            handlePushToTalkStop()
+          }
+        }}
+        onPointerCancel={handlePushToTalkStop}
+        disabled={!isConnected || appState === 'error'}
         type="button"
       >
         <div className="button-content">
@@ -141,6 +179,7 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
               <div className="microphone-icon">🎤</div>
             )}
             {appState === 'recording' && <div className="recording-indicator" />}
+            {appState === 'processing' && <div className="processing-spinner" />}
             {appState === 'error' && <div className="error-icon">❌</div>}
           </div>
           <div className="button-text">{getButtonText()}</div>
@@ -150,7 +189,7 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
       {errorMessage && (
         <div className="error-message">
           <p>{errorMessage}</p>
-          <button onClick={handleReset} className="reset-button">
+          <button onClick={handleReset} className="reset-button" type="button">
             Reset
           </button>
         </div>
@@ -158,8 +197,9 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
 
       <div className="instructions">
         <p>
-          Hold down the button to stream your voice to the worker. Release to stop the WebRTC
-          session and start a new one when you are ready.
+          Use the connect button to negotiate the WebRTC session. While connected, hold the
+          push-to-talk control to stream your microphone; release to buffer the worker output and
+          play it back.
         </p>
       </div>
     </div>

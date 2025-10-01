@@ -20,6 +20,9 @@ function App() {
       case 'recording':
         setWaveformMode('input')
         break
+      case 'processing':
+        setWaveformMode('output')
+        break
       case 'playing':
         setWaveformMode('output')
         break
@@ -39,7 +42,7 @@ function App() {
     <div className="App">
       <header className="app-header">
         <h1>Voice Changer</h1>
-        <p>Press and hold the button to record, release to process and play back</p>
+        <p>Connect first, then hold push-to-talk to stream audio and release to hear the result</p>
         <div className={`connection-status ${connectionStatus}`}>
           Status: {connectionStatus}
         </div>
