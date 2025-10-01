@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Minimal WebRTC regression harness that streams audio with MediaPlayer."""
 
 from __future__ import annotations

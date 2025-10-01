@@ -224,16 +224,25 @@ k8s-rebuild component:
 
 # Helm Deployment (alternative to 'kubectl apply -f k8s/')
 helm-install:
-	@echo "🚀 Installing voice-changer Helm chart..."
-	@echo "Checking minikube status..."
-	@minikube status >/dev/null 2>&1 || (echo "Starting minikube..." && minikube start --driver=qemu)
-	@echo "✅ Minikube is running"
-	@echo ""
-	@echo "Building Docker images in minikube..."
-	@./scripts/build-images.sh
-	@echo ""
-	@echo "Installing Helm chart..."
-	helm install voice-changer helm/voice-changer
+        @echo "🚀 Installing voice-changer Helm chart..."
+        @echo "Checking minikube status..."
+        @driver="${MINIKUBE_DRIVER:-docker}"; \
+                if ! minikube status >/dev/null 2>&1; then \
+                        echo "Starting minikube with driver '${driver}'..."; \
+                        minikube start --driver="${driver}"; \
+                fi
+        @echo "✅ Minikube is running"
+        @if [ "${SKIP_BUILD_IMAGES:-0}" != "1" ]; then \
+                echo ""; \
+                echo "Building Docker images in minikube..."; \
+                ./scripts/build-images.sh; \
+        else \
+                echo ""; \
+                echo "Skipping Docker image build (SKIP_BUILD_IMAGES=${SKIP_BUILD_IMAGES:-})"; \
+        fi
+        @echo ""
+        @echo "Installing Helm chart..."
+        helm install voice-changer helm/voice-changer
 	@echo ""
 	@echo "Waiting for pods to be ready..."
 	kubectl wait --for=condition=ready pod -l app=voice-changer --timeout=120s
