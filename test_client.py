@@ -16,7 +16,7 @@ from urllib import request
 
 import numpy as np
 import typer
-from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc import RTCPeerConnection, RTCSessionDescription, RTCDataChannel
 from aiortc.contrib.media import MediaPlayer
 from aiortc.mediastreams import MediaStreamError, MediaStreamTrack
 
@@ -199,6 +199,9 @@ class DurationLoggingTrack(MediaStreamTrack):
         self._total_samples = 0
         self._last_sample_rate = 0
         self._frame_count = 0
+        self._log_interval_sec = 0.5
+        self._log_interval_samples = 0
+        self._next_log_sample = 0
 
     async def recv(self) -> AudioFrame:  # type: ignore[override]
         """Receive and return the next frame while updating duration metrics.
@@ -220,14 +223,22 @@ class DurationLoggingTrack(MediaStreamTrack):
             self._last_sample_rate = frame.sample_rate
 
         if self._last_sample_rate:
-            duration = self._total_samples / float(self._last_sample_rate)
-            logger.info(
-                "🎚️ Client %s cumulative duration: %.3f s (frames=%d, rate=%d)",
-                self._label,
-                duration,
-                self._total_samples,
-                self._last_sample_rate,
+            self._log_interval_samples = max(
+                1, int(self._last_sample_rate * self._log_interval_sec)
             )
+            if self._next_log_sample == 0:
+                self._next_log_sample = self._log_interval_samples
+
+            while self._total_samples >= self._next_log_sample:
+                duration = self._total_samples / float(self._last_sample_rate)
+                logger.info(
+                    "🎚️ Client %s cumulative duration: %.3f s (frames=%d, rate=%d)",
+                    self._label,
+                    duration,
+                    self._total_samples,
+                    self._last_sample_rate,
+                )
+                self._next_log_sample += self._log_interval_samples
 
         return frame
 
@@ -259,6 +270,8 @@ async def record_audio(track: MediaStreamTrack, output_path: Path) -> int:
     sample_rate: int | None = None
     sample_width: int | None = None
     channels: int | None = None
+    log_interval_frames = 0
+    next_log_frame = 0
 
     _ensure_parent(output_path)
 
@@ -286,6 +299,8 @@ async def record_audio(track: MediaStreamTrack, output_path: Path) -> int:
                 logger.info(
                     "📝 Output format: %s Hz, %s bytes/sample, %s channels", sample_rate, sample_width, channels
                 )
+                log_interval_frames = max(1, int(sample_rate * 0.5))
+                next_log_frame = log_interval_frames
             else:
                 if frame_rate != sample_rate or frame_width != sample_width or frame_channels != channels:
                     logger.warning(
@@ -300,6 +315,8 @@ async def record_audio(track: MediaStreamTrack, output_path: Path) -> int:
                     sample_rate = frame_rate
                     sample_width = frame_width
                     channels = frame_channels
+                    log_interval_frames = max(1, int(sample_rate * 0.5)) if sample_rate else 0
+                    next_log_frame = total_frames + log_interval_frames if log_interval_frames else 0
 
             assert channels is not None
             interleaved = _ensure_interleaved(frame, channels)
@@ -309,6 +326,17 @@ async def record_audio(track: MediaStreamTrack, output_path: Path) -> int:
 
             writer.writeframes(interleaved.tobytes())
             total_frames += interleaved.shape[0]
+
+            if log_interval_frames and sample_rate:
+                while total_frames >= next_log_frame:
+                    duration = total_frames / float(sample_rate)
+                    logger.info(
+                        "🎚️ Client recv cumulative duration: %.3f s (frames=%d, rate=%d)",
+                        duration,
+                        total_frames,
+                        sample_rate,
+                    )
+                    next_log_frame += log_interval_frames
 
             if sample_rate:
                 duration = total_frames / float(sample_rate)
@@ -353,6 +381,38 @@ async def run_session(
         raise RuntimeError(f"No audio stream available in {input_path}")
 
     pc = RTCPeerConnection()
+    control_channel: RTCDataChannel = pc.createDataChannel("control")
+    control_ready = asyncio.Event()
+    flush_done_event = asyncio.Event()
+    flush_acknowledged = False
+
+    @control_channel.on("open")
+    def on_control_open() -> None:
+        progress("🛰️ Control channel established")
+        control_ready.set()
+
+    @control_channel.on("close")
+    def on_control_close() -> None:
+        logger.info("Control data channel closed")
+
+    @control_channel.on("message")
+    def on_control_message(message: object) -> None:
+        nonlocal flush_acknowledged
+
+        if isinstance(message, bytes):
+            try:
+                message = message.decode("utf-8")
+            except Exception:
+                logger.warning("Received non-UTF8 payload on control channel; ignoring")
+                return
+
+        if isinstance(message, str) and message.strip().lower() == "flush_done":
+            flush_acknowledged = True
+            progress("🚰 Worker reported flush completion")
+            flush_done_event.set()
+        else:
+            logger.debug("Ignoring unexpected control message: %r", message)
+
     record_task: asyncio.Task[int] | None = None
     recorder_result: int = 0
     send_track = DurationLoggingTrack(player.audio, label="send")
@@ -384,8 +444,39 @@ async def run_session(
 
         await asyncio.sleep(config.wait_after_input)
 
+        try:
+            await asyncio.wait_for(control_ready.wait(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.error("❌ Control data channel failed to open within timeout")
+            return False
+
+        if control_channel.readyState != "open":
+            logger.error("❌ Control data channel not open after negotiation")
+            return False
+
+        try:
+            control_channel.send("flush")
+            progress("🚰 Requested worker flush")
+        except Exception as exc:
+            logger.error("❌ Failed to send flush request: %s", exc)
+            return False
+
+        try:
+            await asyncio.wait_for(flush_done_event.wait(), timeout=10.0)
+        except asyncio.TimeoutError:
+            logger.error("❌ Timed out waiting for worker flush acknowledgment")
+            return False
+
+        if not flush_acknowledged:
+            logger.error("❌ Worker did not acknowledge flush request")
+            return False
+
         if record_task is not None:
-            recorder_result = await record_task
+            try:
+                recorder_result = await asyncio.wait_for(record_task, timeout=10.0)
+            except asyncio.TimeoutError:
+                logger.error("❌ Recorder task did not finish after flush")
+                return False
         else:
             logger.error("❌ Remote audio track was never received")
             return False
@@ -403,6 +494,11 @@ async def run_session(
         progress("🏁 Session complete")
         return success
     finally:
+        if control_channel.readyState == "open":
+            try:
+                control_channel.close()
+            except Exception:
+                logger.exception("Failed to close control channel cleanly")
         await pc.close()
         stop = getattr(player, "stop", None)
         if callable(stop):

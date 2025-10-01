@@ -6,11 +6,6 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
-import os
-import uuid
-from contextlib import asynccontextmanager
-
-import httpx
 import librosa
 import numpy as np
 import soundfile as sf
@@ -18,47 +13,15 @@ from aiortc import RTCPeerConnection, RTCSessionDescription
 from aiortc.mediastreams import MediaStreamTrack
 from av import AudioFrame
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+
+from worker import WorkerContext, WorkerSettings, make_worker_app
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 for noisy_logger in ("httpx", "httpcore"):
     logging.getLogger(noisy_logger).setLevel(logging.WARNING)
-
-# Worker configuration for heartbeat and load balancing
-WORKER_ID = os.environ.get("HOSTNAME", str(uuid.uuid4()))
-WORKER_URL = f"http://{os.environ.get('POD_IP', '127.0.0.1')}:8001"
-API_URL = os.environ.get("API_URL", "http://voice-changer-api:8000")
-HEARTBEAT_INTERVAL = 5  # seconds
-MAX_CONNECTIONS = 4
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Initialize worker and start background tasks on application startup.
-
-    Args:
-        app: FastAPI application instance managed by the lifespan context.
-    """
-    asyncio.create_task(heartbeat_loop())
-    logger.info("✅ Worker initialized: id=%s url=%s", WORKER_ID, WORKER_URL)
-    yield
-    # Shutdown: ensure all active peer connections are closed
-    await asyncio.gather(*(_cleanup_peer(pc) for pc in list(active_peers)), return_exceptions=True)
-
-
-app = FastAPI(title="Voice Changer WebRTC Worker", version="3.0.0", lifespan=lifespan)
-
-# Allow local development hosts to negotiate directly with the worker.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 
 class SDPModel(BaseModel):
@@ -99,7 +62,7 @@ class PitchShiftTrack(MediaStreamTrack):
         Returns:
             Audio frame with the configured pitch shift applied.
         """
-        frame = await self._source.recv()
+        frame: AudioFrame = await self._source.recv()
         self._frame_count += 1
 
         sample_rate = frame.sample_rate or TARGET_SAMPLE_RATE
@@ -204,165 +167,75 @@ class PitchShiftTrack(MediaStreamTrack):
         )
 
 
-active_peers: set[RTCPeerConnection] = set()
+SETTINGS = WorkerSettings(
+    title="Voice Changer WebRTC Worker",
+    version="3.0.0",
+    service_name="voice_changer_webrtc_worker",
+    capabilities=["pitch_shifting", "webrtc", "streaming_audio"],
+)
 
 
-async def _wait_for_ice_completion(pc: RTCPeerConnection) -> None:
-    """Poll until ICE gathering completes for the provided connection.
+def register_routes(app: FastAPI, ctx: WorkerContext) -> None:
+    @app.post("/offer")
+    async def handle_offer(payload: SDPModel) -> dict[str, str]:
+        pc = RTCPeerConnection()
+        ctx.active_peers.add(pc)
+        logger.info("📡 Received new WebRTC offer; active peers: %d", len(ctx.active_peers))
 
-    Args:
-        pc: Connection whose ICE gathering state should reach completion.
-    """
-    while pc.iceGatheringState != "complete":
-        await asyncio.sleep(0.05)
+        cleanup_started = False
 
+        async def cleanup() -> None:
+            nonlocal cleanup_started
+            if cleanup_started:
+                return
+            cleanup_started = True
+            await ctx.cleanup_peer(pc)
 
-async def _cleanup_peer(pc: RTCPeerConnection) -> None:
-    """Remove a peer from the active set and close its connection.
+        @pc.on("connectionstatechange")
+        async def on_connection_state_change() -> None:  # pragma: no cover - network dependent
+            logger.info("Peer connection state: %s", pc.connectionState)
+            if pc.connectionState in {"failed", "closed", "disconnected"}:
+                await cleanup()
 
-    Args:
-        pc: Connection that should be cleaned up and closed.
-    """
-    if pc in active_peers:
-        active_peers.remove(pc)
-    await pc.close()
-    logger.info("🔌 Closed peer connection (%s)", pc)
+        track_ready = asyncio.Event()
 
+        @pc.on("track")
+        async def on_track(track: MediaStreamTrack) -> None:
+            logger.info("🎙️ Incoming track: %s", track.kind)
+            if track.kind != "audio":
+                logger.debug("Ignoring non-audio track of kind %s", track.kind)
+                return
 
-async def heartbeat_loop() -> None:
-    """Send periodic heartbeats so the API can track worker capacity."""
-    logger.info(
-        "🫀 Starting heartbeat loop to %s (worker_id=%s, worker_url=%s)",
-        API_URL,
-        WORKER_ID,
-        WORKER_URL,
-    )
-
-    async with httpx.AsyncClient() as client:
-        while True:
-            try:
-                await client.post(
-                    f"{API_URL}/heartbeat",
-                    json={
-                        "worker_id": WORKER_ID,
-                        "worker_url": WORKER_URL,
-                        "connection_count": len(active_peers),
-                        "max_connections": MAX_CONNECTIONS,
-                    },
-                    timeout=5.0,
-                )
-                logger.debug(
-                    "💓 Heartbeat sent: %d/%d connections", len(active_peers), MAX_CONNECTIONS
-                )
-            except Exception as exc:
-                logger.warning("⚠️ Heartbeat failed: %s", exc)
-
-            await asyncio.sleep(HEARTBEAT_INTERVAL)
-
-
-@app.get("/")
-async def get_status() -> dict[str, str]:
-    """Return a simple readiness response for health probes.
-
-    Returns:
-        Service identifier and status metadata.
-    """
-    return {"status": "running", "service": "voice_changer_webrtc_worker", "version": "3.0.0"}
-
-
-@app.get("/health")
-async def health_check() -> dict[str, object]:
-    """Report the current health state and connection metrics.
-
-    Returns:
-        Details about service status and active peers.
-    """
-    return {
-        "status": "healthy",
-        "active_peers": len(active_peers),
-        "service": "voice_changer_webrtc_worker",
-        "version": "3.0.0",
-        "capabilities": ["pitch_shifting", "webrtc", "streaming_audio"],
-    }
-
-
-@app.get("/capacity")
-async def get_capacity() -> dict[str, object]:
-    """Return current worker capacity and availability information.
-
-    Returns:
-        Worker identification, load, and availability status.
-    """
-    return {
-        "worker_id": WORKER_ID,
-        "worker_url": WORKER_URL,
-        "connection_count": len(active_peers),
-        "max_connections": MAX_CONNECTIONS,
-        "available": len(active_peers) < MAX_CONNECTIONS,
-    }
-
-
-@app.post("/offer")
-async def handle_offer(payload: SDPModel) -> dict[str, str]:
-    """Accept an SDP offer and return the corresponding answer.
-
-    Args:
-        payload: The SDP model supplied by the signalling API.
-
-    Returns:
-        The generated SDP answer describing the worker session.
-    """
-
-    pc = RTCPeerConnection()
-    active_peers.add(pc)
-    logger.info("📡 Received new WebRTC offer; active peers: %d", len(active_peers))
-
-    @pc.on("connectionstatechange")
-    async def on_connection_state_change() -> None:  # pragma: no cover - relies on network state
-        """Monitor peer state changes and trigger cleanup when disconnected."""
-        logger.info("Peer connection state: %s", pc.connectionState)
-        if pc.connectionState in {"failed", "closed", "disconnected"}:
-            await _cleanup_peer(pc)
-
-    track_ready = asyncio.Event()
-
-    @pc.on("track")
-    async def on_track(track: MediaStreamTrack) -> None:
-        """Handle incoming audio tracks by applying pitch shifting.
-
-        Args:
-            track: Remote track received from the signalling peer.
-        """
-        logger.info("🎙️ Incoming track: %s", track.kind)
-        if track.kind == "audio":
             transformed = PitchShiftTrack(track)
             pc.addTrack(transformed)
             track_ready.set()
 
             @track.on("ended")
             async def on_track_ended() -> None:
-                """Log track completion and dispose of the peer connection."""
                 logger.info("🏁 Audio track ended")
-                await _cleanup_peer(pc)
+                await cleanup()
 
-    offer = RTCSessionDescription(sdp=payload.sdp, type=payload.type)
+        offer = RTCSessionDescription(sdp=payload.sdp, type=payload.type)
 
-    try:
-        await pc.setRemoteDescription(offer)
         try:
-            await asyncio.wait_for(track_ready.wait(), timeout=5.0)
-        except TimeoutError:
-            logger.warning("⚠️ No audio track received before answer generation")
-        answer = await pc.createAnswer()
-        await pc.setLocalDescription(answer)
-        await _wait_for_ice_completion(pc)
-    except Exception as exc:  # pragma: no cover - network failure handling
-        await _cleanup_peer(pc)
-        raise HTTPException(status_code=500, detail=f"Failed to process SDP offer: {exc}")
+            await pc.setRemoteDescription(offer)
+            try:
+                await asyncio.wait_for(track_ready.wait(), timeout=5.0)
+            except TimeoutError:
+                logger.warning("⚠️ No audio track received before answer generation")
+            answer = await pc.createAnswer()
+            await pc.setLocalDescription(answer)
+            await ctx.wait_for_ice_completion(pc)
+        except Exception as exc:  # pragma: no cover - network failure handling
+            await cleanup()
+            raise HTTPException(status_code=500, detail=f"Failed to process SDP offer: {exc}")
 
-    logger.info("✅ Generated SDP answer")
-    assert pc.localDescription is not None
-    return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+        logger.info("✅ Generated SDP answer")
+        assert pc.localDescription is not None
+        return {"sdp": pc.localDescription.sdp, "type": pc.localDescription.type}
+
+
+app = make_worker_app(settings=SETTINGS, logger=logger, register_routes=register_routes)
 
 
 if __name__ == "__main__":

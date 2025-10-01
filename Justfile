@@ -243,10 +243,10 @@ helm-install:
         @echo ""
         @echo "Installing Helm chart..."
         helm install voice-changer helm/voice-changer
-	@echo ""
-	@echo "Waiting for pods to be ready..."
-	kubectl wait --for=condition=ready pod -l app=voice-changer --timeout=120s
-	@echo ""
+        @echo ""
+        @echo "Waiting for pods to be ready..."
+        kubectl wait --for=condition=ready pod -l app=voice-changer --timeout=120s
+        @echo ""
 
 helm-upgrade:
 	@echo "🔄 Upgrading voice-changer Helm release..."
