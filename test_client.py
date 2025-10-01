@@ -10,6 +10,7 @@ import logging
 import os
 import wave
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from urllib import request
@@ -187,12 +188,6 @@ class DurationLoggingTrack(MediaStreamTrack):
     kind = "audio"
 
     def __init__(self, source: MediaStreamTrack, label: str):
-        """Wrap a media track and log cumulative audio duration.
-
-        Args:
-            source: Underlying media track to proxy.
-            label: Human-readable identifier for log messages.
-        """
         super().__init__()
         self._source = source
         self._label = label
@@ -204,11 +199,6 @@ class DurationLoggingTrack(MediaStreamTrack):
         self._next_log_sample = 0
 
     async def recv(self) -> AudioFrame:  # type: ignore[override]
-        """Receive and return the next frame while updating duration metrics.
-
-        Returns:
-            Audio frame fetched from the underlying source.
-        """
         frame = await self._source.recv()
         assert isinstance(frame, AudioFrame)
 
@@ -243,7 +233,6 @@ class DurationLoggingTrack(MediaStreamTrack):
         return frame
 
     def stop(self) -> None:  # pragma: no cover - passthrough cleanup
-        """Stop the proxy track while draining asynchronous cleanup hooks."""
         maybe_awaitable = super().stop()
         if inspect.isawaitable(maybe_awaitable):
             _drain_async(maybe_awaitable)
@@ -255,104 +244,182 @@ class DurationLoggingTrack(MediaStreamTrack):
                 _drain_async(maybe_awaitable)
 
 
-async def record_audio(track: MediaStreamTrack, output_path: Path) -> int:
-    """Capture audio from a remote track and write it to disk.
+class RecordingTrack(MediaStreamTrack):
+    """Observer track that records audio frames from another media track."""
 
-    Args:
-        track: Remote media track streaming audio from the worker.
-        output_path: Destination where recorded audio should be written.
+    kind = "audio"
 
-    Returns:
-        Number of audio frames recorded to the output file.
-    """
-    total_frames = 0
-    writer: wave.Wave_write | None = None
-    sample_rate: int | None = None
-    sample_width: int | None = None
-    channels: int | None = None
-    log_interval_frames = 0
-    next_log_frame = 0
+    def __init__(self, source: MediaStreamTrack, output_path: Path, log_interval: float = 0.5):
+        super().__init__()
+        self._source = source
+        self._output_path = Path(output_path)
+        self._log_interval = log_interval
+        self._stop_event = asyncio.Event()
+        self._task: asyncio.Task[int] | None = None
+        self._total_frames = 0
+        self._writer: wave.Wave_write | None = None
+        self._sample_rate: int | None = None
+        self._sample_width: int | None = None
+        self._channels: int | None = None
+        self._start()
 
-    _ensure_parent(output_path)
+    def _start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.create_task(self._record_loop())
 
-    try:
-        while True:
-            frame = await track.recv()
-            assert isinstance(frame, AudioFrame)
+    def request_stop(self) -> None:
+        self._stop_event.set()
 
-            frame_channels = getattr(frame.layout, "channels", None)
-            if frame_channels is None:
-                frame_channels = getattr(frame, "channels", 1)
-            if isinstance(frame_channels, list | tuple):
-                frame_channels = len(frame_channels)
-            frame_width = frame.format.bytes
-            frame_rate = frame.sample_rate
+    async def wait(self, timeout: float | None = None) -> int:
+        if self._task is None:
+            return self._total_frames
+        try:
+            if timeout is None:
+                return await self._task
+            return await asyncio.wait_for(self._task, timeout)
+        finally:
+            self._task = None
 
-            if writer is None:
-                writer = wave.open(str(output_path), "wb")
-                writer.setnchannels(frame_channels)
-                writer.setsampwidth(frame_width)
-                writer.setframerate(frame_rate)
-                sample_rate = frame_rate
-                sample_width = frame_width
-                channels = frame_channels
-                logger.info(
-                    "📝 Output format: %s Hz, %s bytes/sample, %s channels", sample_rate, sample_width, channels
+    @property
+    def recorded_frames(self) -> int:
+        return self._total_frames
+
+    async def recv(self) -> AudioFrame:  # type: ignore[override]
+        raise MediaStreamError
+
+    def stop(self) -> None:  # pragma: no cover - passthrough cleanup
+        self._stop_event.set()
+        if self._task and not self._task.done():
+            self._task.cancel()
+
+        maybe_awaitable = super().stop()
+        if inspect.isawaitable(maybe_awaitable):
+            _drain_async(maybe_awaitable)
+
+        source_stop = getattr(self._source, "stop", None)
+        if callable(source_stop):
+            maybe_awaitable = source_stop()
+            if inspect.isawaitable(maybe_awaitable):  # type: ignore[misc]
+                _drain_async(maybe_awaitable)
+
+    async def _record_loop(self) -> int:
+        total_frames = 0
+        writer: wave.Wave_write | None = None
+        sample_rate: int | None = None
+        sample_width: int | None = None
+        channels: int | None = None
+        log_interval_frames = 0
+        next_log_frame = 0
+
+        _ensure_parent(self._output_path)
+
+        try:
+            while True:
+                recv_task = asyncio.create_task(self._source.recv())
+                stop_task = asyncio.create_task(self._stop_event.wait())
+                done, _ = await asyncio.wait(
+                    {recv_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
                 )
-                log_interval_frames = max(1, int(sample_rate * 0.5))
-                next_log_frame = log_interval_frames
-            else:
-                if frame_rate != sample_rate or frame_width != sample_width or frame_channels != channels:
-                    logger.warning(
-                        "Frame format change detected (rate=%s width=%s channels=%s); adjusting writer",
-                        frame_rate,
-                        frame_width,
-                        frame_channels,
-                    )
-                    writer.setframerate(frame_rate)
-                    writer.setsampwidth(frame_width)
+
+                if stop_task in done:
+                    recv_task.cancel()
+                    with suppress(asyncio.CancelledError, MediaStreamError):
+                        await recv_task
+                    break
+
+                stop_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await stop_task
+
+                try:
+                    frame = recv_task.result()
+                except MediaStreamError:
+                    logger.info("Remote track ended; stopping recorder")
+                    break
+
+                assert isinstance(frame, AudioFrame)
+                frame_channels = getattr(frame.layout, "channels", None)
+                if frame_channels is None:
+                    frame_channels = getattr(frame, "channels", 1)
+                if isinstance(frame_channels, (list, tuple)):
+                    frame_channels = len(frame_channels)
+                frame_width = frame.format.bytes
+                frame_rate = frame.sample_rate
+
+                if writer is None:
+                    writer = wave.open(str(self._output_path), "wb")
                     writer.setnchannels(frame_channels)
+                    writer.setsampwidth(frame_width)
+                    writer.setframerate(frame_rate)
                     sample_rate = frame_rate
                     sample_width = frame_width
                     channels = frame_channels
-                    log_interval_frames = max(1, int(sample_rate * 0.5)) if sample_rate else 0
-                    next_log_frame = total_frames + log_interval_frames if log_interval_frames else 0
-
-            assert channels is not None
-            interleaved = _ensure_interleaved(frame, channels)
-
-            if interleaved.size == 0:
-                continue
-
-            writer.writeframes(interleaved.tobytes())
-            total_frames += interleaved.shape[0]
-
-            if log_interval_frames and sample_rate:
-                while total_frames >= next_log_frame:
-                    duration = total_frames / float(sample_rate)
                     logger.info(
-                        "🎚️ Client recv cumulative duration: %.3f s (frames=%d, rate=%d)",
-                        duration,
-                        total_frames,
+                        "📝 Output format: %s Hz, %s bytes/sample, %s channels",
                         sample_rate,
+                        sample_width,
+                        channels,
                     )
-                    next_log_frame += log_interval_frames
+                    log_interval_frames = (
+                        max(1, int(sample_rate * self._log_interval)) if sample_rate else 0
+                    )
+                    next_log_frame = log_interval_frames
+                else:
+                    if (
+                        frame_rate != sample_rate
+                        or frame_width != sample_width
+                        or frame_channels != channels
+                    ):
+                        logger.warning(
+                            "Frame format change detected (rate=%s width=%s channels=%s); adjusting writer",
+                            frame_rate,
+                            frame_width,
+                            frame_channels,
+                        )
+                        writer.setframerate(frame_rate)
+                        writer.setsampwidth(frame_width)
+                        writer.setnchannels(frame_channels)
+                        sample_rate = frame_rate
+                        sample_width = frame_width
+                        channels = frame_channels
+                        log_interval_frames = (
+                            max(1, int(sample_rate * self._log_interval)) if sample_rate else 0
+                        )
+                        next_log_frame = (
+                            total_frames + log_interval_frames if log_interval_frames else 0
+                        )
 
-            if sample_rate:
-                duration = total_frames / float(sample_rate)
-                logger.info(
-                    "🎚️ Client recv cumulative duration: %.3f s (frames=%d, rate=%d)",
-                    duration,
-                    total_frames,
-                    sample_rate,
-                )
-    except MediaStreamError:
-        logger.info("Remote track ended; stopping recorder")
-    finally:
-        if writer is not None:
-            writer.close()
+                assert channels is not None
+                interleaved = _ensure_interleaved(frame, channels)
+                if interleaved.size == 0:
+                    continue
 
-    return total_frames
+                writer.writeframes(interleaved.tobytes())
+                total_frames += interleaved.shape[0]
+
+                if log_interval_frames and sample_rate:
+                    while total_frames >= next_log_frame:
+                        duration = total_frames / float(sample_rate)
+                        logger.info(
+                            "🎚️ Client recv cumulative duration: %.3f s (frames=%d, rate=%d)",
+                            duration,
+                            total_frames,
+                            sample_rate,
+                        )
+                        next_log_frame += log_interval_frames
+        except asyncio.CancelledError:  # pragma: no cover - cancellation path
+            logger.debug("Recording task cancelled")
+            raise
+        finally:
+            if writer is not None:
+                writer.close()
+            self._writer = writer
+            self._sample_rate = sample_rate
+            self._sample_width = sample_width
+            self._channels = channels
+            self._total_frames = total_frames
+
+        return total_frames
 
 
 async def run_session(
@@ -413,7 +480,20 @@ async def run_session(
         else:
             logger.debug("Ignoring unexpected control message: %r", message)
 
-    record_task: asyncio.Task[int] | None = None
+    record_track: RecordingTrack | None = None
+
+    async def stop_recording(timeout: float = 10.0) -> int:
+        nonlocal record_track
+        if record_track is None:
+            return 0
+        try:
+            record_track.request_stop()
+            result = await record_track.wait(timeout)
+            return result
+        finally:
+            with suppress(Exception):
+                record_track.stop()
+            record_track = None
     recorder_result: int = 0
     send_track = DurationLoggingTrack(player.audio, label="send")
 
@@ -424,13 +504,13 @@ async def run_session(
         Args:
             track: Remote track received from the worker.
         """
-        nonlocal record_task
+        nonlocal record_track
         if track.kind != "audio":
             logger.debug("Ignoring non-audio track of kind %s", track.kind)
             return
         progress("🔁 Remote audio track established")
-        if record_task is None:
-            record_task = asyncio.create_task(record_audio(track, output_path))
+        if record_track is None:
+            record_track = RecordingTrack(track, output_path, log_interval=0.5)
 
     pc.addTrack(send_track)
 
@@ -448,10 +528,12 @@ async def run_session(
             await asyncio.wait_for(control_ready.wait(), timeout=5.0)
         except asyncio.TimeoutError:
             logger.error("❌ Control data channel failed to open within timeout")
+            await stop_recording()
             return False
 
         if control_channel.readyState != "open":
             logger.error("❌ Control data channel not open after negotiation")
+            await stop_recording()
             return False
 
         try:
@@ -459,30 +541,28 @@ async def run_session(
             progress("🚰 Requested worker flush")
         except Exception as exc:
             logger.error("❌ Failed to send flush request: %s", exc)
+            await stop_recording()
             return False
 
         try:
             await asyncio.wait_for(flush_done_event.wait(), timeout=10.0)
         except asyncio.TimeoutError:
             logger.error("❌ Timed out waiting for worker flush acknowledgment")
+            await stop_recording()
             return False
 
         if not flush_acknowledged:
             logger.error("❌ Worker did not acknowledge flush request")
+            await stop_recording()
             return False
 
-        if record_task is not None:
-            try:
-                recorder_result = await asyncio.wait_for(record_task, timeout=10.0)
-            except asyncio.TimeoutError:
-                logger.error("❌ Recorder task did not finish after flush")
-                return False
-        else:
+        recorder_result = await stop_recording()
+        if recorder_result <= 0:
             logger.error("❌ Remote audio track was never received")
             return False
 
         progress(f"💾 Captured {recorder_result} frames to {output_path}")
-        success = recorder_result > 0 and output_path.exists()
+        success = output_path.exists()
 
         if success and expected_output is not None:
             if _validate_file_size(output_path, expected_output):
@@ -494,6 +574,7 @@ async def run_session(
         progress("🏁 Session complete")
         return success
     finally:
+        await stop_recording()
         if control_channel.readyState == "open":
             try:
                 control_channel.close()

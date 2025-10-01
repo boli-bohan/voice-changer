@@ -20,12 +20,6 @@ function App() {
       case 'recording':
         setWaveformMode('input')
         break
-      case 'processing':
-        setWaveformMode('output')
-        break
-      case 'playing':
-        setWaveformMode('output')
-        break
       default:
         setWaveformMode('inactive')
         break

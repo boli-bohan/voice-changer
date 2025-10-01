@@ -7,7 +7,7 @@ interface PushToTalkButtonProps {
   onAppStateChange?: (state: AppState) => void
 }
 
-export type AppState = 'idle' | 'recording' | 'processing' | 'playing' | 'error'
+export type AppState = 'idle' | 'recording'
 
 const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
   onConnectionStatusChange,
@@ -23,18 +23,15 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
     startTalking,
     stopTalking,
     connectionState,
-    isTalking,
     isConnected,
   } = useWebRTC({
     apiBaseUrl: 'http://localhost:8000',
     onStatusChange: onConnectionStatusChange,
     onError: useCallback((error: string) => {
-      setAppState('error')
+      setAppState('idle')
       setErrorMessage(error)
     }, []),
-    onRemoteStarted: useCallback(() => {
-      setAppState('playing')
-    }, []),
+    onRemoteStarted: undefined,
     onRemoteStopped: useCallback(() => {
       setAppState('idle')
     }, []),
@@ -51,12 +48,6 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
     }
   }, [connectionState])
 
-  useEffect(() => {
-    if (appState === 'error') {
-      setIsPointerActive(false)
-    }
-  }, [appState])
-
   const handleConnect = useCallback(async () => {
     setErrorMessage('')
     setAppState('idle')
@@ -64,7 +55,6 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
       await connect()
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to connect to worker'
-      setAppState('error')
       setErrorMessage(message)
     }
   }, [connect])
@@ -79,7 +69,6 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
   const handlePushToTalkStart = useCallback(() => {
     if (!isConnected) {
       setErrorMessage('Connect to the worker before streaming audio.')
-      setAppState('error')
       return
     }
 
@@ -93,11 +82,9 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
     if (!isConnected) return
 
     setIsPointerActive(false)
-    if (isTalking) {
-      setAppState('processing')
-    }
+    setAppState('idle')
     stopTalking()
-  }, [isConnected, isTalking, stopTalking])
+  }, [isConnected, stopTalking])
 
   const handleReset = useCallback(() => {
     setAppState('idle')
@@ -108,17 +95,9 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
   const getButtonText = () => {
     switch (appState) {
       case 'idle':
-        return isConnected ? 'Hold to speak' : 'Connect first to begin'
-      case 'recording':
-        return 'Streaming voice… release to stop'
-      case 'processing':
-        return 'Processing response…'
-      case 'playing':
-        return 'Playing transformed audio'
-      case 'error':
-        return 'Error occurred'
+        return isConnected ? 'Push-to-talk' : 'Connect first to begin'
       default:
-        return 'Hold to speak'
+        return 'Push-to-talk'
     }
   }
 
@@ -126,12 +105,6 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
     const states = [appState]
     if (isPointerActive) {
       states.push('recording')
-    }
-    if (appState === 'processing') {
-      states.push('processing')
-    }
-    if (appState === 'playing') {
-      states.push('playing')
     }
     return `push-to-talk-button ${states.join(' ')}`
   }
@@ -170,17 +143,15 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
           }
         }}
         onPointerCancel={handlePushToTalkStop}
-        disabled={!isConnected || appState === 'error'}
+        disabled={!isConnected}
         type="button"
       >
         <div className="button-content">
           <div className="button-icon">
-            {(appState === 'idle' || appState === 'playing') && (
+            {appState === 'idle' && (
               <div className="microphone-icon">🎤</div>
             )}
             {appState === 'recording' && <div className="recording-indicator" />}
-            {appState === 'processing' && <div className="processing-spinner" />}
-            {appState === 'error' && <div className="error-icon">❌</div>}
           </div>
           <div className="button-text">{getButtonText()}</div>
         </div>
@@ -198,8 +169,7 @@ const PushToTalkButton: React.FC<PushToTalkButtonProps> = ({
       <div className="instructions">
         <p>
           Use the connect button to negotiate the WebRTC session. While connected, hold the
-          push-to-talk control to stream your microphone; release to buffer the worker output and
-          play it back.
+          push-to-talk control to stream your microphone; release to stop streaming.
         </p>
       </div>
     </div>

@@ -8,7 +8,7 @@ import os
 import uuid
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Iterable
+from typing import Callable, Iterable
 
 import httpx
 from aiortc import RTCPeerConnection
@@ -33,6 +33,7 @@ class WorkerSettings:
     api_url: str = os.environ.get("API_URL", "http://voice-changer-api:8000")
     worker_host: str = os.environ.get("POD_IP", "127.0.0.1")
     worker_id: str = field(default_factory=lambda: os.environ.get("HOSTNAME", str(uuid.uuid4())))
+    worker_url: str = field(default_factory=lambda: f"http://{os.environ.get('POD_IP', '127.0.0.1')}:{os.environ.get('WORKER_PORT', '8001')}")
 
     def __post_init__(self) -> None:
         self.worker_url = f"http://{self.worker_host}:{self.worker_port}"

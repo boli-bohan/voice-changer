@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 
 interface UseWebRTCOptions {
   apiBaseUrl: string
@@ -6,6 +6,7 @@ interface UseWebRTCOptions {
   onError: (error: string) => void
   onRemoteStarted?: () => void
   onRemoteStopped?: () => void
+  remoteAudioRef?: RefObject<HTMLAudioElement>
 }
 
 interface UseWebRTCControls {
@@ -18,202 +19,82 @@ interface UseWebRTCControls {
   isConnected: boolean
 }
 
-const REMOTE_FLUSH_DELAY_MS = 250
-
-const selectRecorderOptions = () => {
-  if (typeof window === 'undefined' || typeof MediaRecorder === 'undefined') {
-    return null
-  }
-
-  const preferred = ['audio/webm;codecs=opus', 'audio/webm']
-  for (const mimeType of preferred) {
-    if (MediaRecorder.isTypeSupported(mimeType)) {
-      return { mimeType }
-    }
-  }
-
-  return {}
-}
-
 export const useWebRTC = ({
   apiBaseUrl,
   onStatusChange,
   onError,
   onRemoteStarted,
   onRemoteStopped,
+  remoteAudioRef,
 }: UseWebRTCOptions): UseWebRTCControls => {
   const peerRef = useRef<RTCPeerConnection | null>(null)
   const localStreamRef = useRef<MediaStream | null>(null)
   const localTracksRef = useRef<MediaStreamTrack[]>([])
   const remoteStreamRef = useRef<MediaStream | null>(null)
-  const recorderRef = useRef<MediaRecorder | null>(null)
-  const recordedChunksRef = useRef<BlobPart[]>([])
-  const recordedMimeRef = useRef<string>('audio/webm')
-  const playbackAudioRef = useRef<HTMLAudioElement | null>(null)
-  const playbackUrlRef = useRef<string | null>(null)
-  const wantRecordingRef = useRef(false)
-  const playbackRequestedRef = useRef(false)
-  const recorderOptions = useMemo(selectRecorderOptions, [])
+  const remoteAudioElementRef = useRef<HTMLAudioElement | null>(null)
 
   const [connectionState, setConnectionState] = useState<
     'connecting' | 'connected' | 'disconnected'
   >('disconnected')
   const [isTalking, setIsTalking] = useState(false)
 
-  const releasePlaybackUrl = useCallback(() => {
-    if (playbackUrlRef.current && typeof URL.revokeObjectURL === 'function') {
-      URL.revokeObjectURL(playbackUrlRef.current)
-    }
-    playbackUrlRef.current = null
-  }, [])
-
-  const finalizePlayback = useCallback(() => {
-    if (!playbackRequestedRef.current) {
-      recordedChunksRef.current = []
-      return
-    }
-
-    const chunks = recordedChunksRef.current
-    recordedChunksRef.current = []
-    playbackRequestedRef.current = false
-
-    if (!chunks.length) {
-      onRemoteStopped?.()
-      return
-    }
-
-    releasePlaybackUrl()
-
-    const blob = new Blob(chunks, { type: recordedMimeRef.current })
-    if (typeof URL.createObjectURL !== 'function') {
-      onError('This environment cannot create audio buffers for playback')
-      onRemoteStopped?.()
-      return
-    }
-    if (typeof Audio === 'undefined') {
-      onError('Audio playback is not supported in this environment')
-      onRemoteStopped?.()
-      return
-    }
-
-    const audioEl = playbackAudioRef.current ?? new Audio()
-    audioEl.autoplay = false
-    audioEl.controls = false
-    audioEl.crossOrigin = 'anonymous'
-    audioEl.currentTime = 0
-
-    const objectUrl = URL.createObjectURL(blob)
-    playbackUrlRef.current = objectUrl
-    audioEl.src = objectUrl
-
-    audioEl.onended = () => {
-      audioEl.onended = null
-      releasePlaybackUrl()
-      onRemoteStopped?.()
-    }
-
-    audioEl.onerror = () => {
-      audioEl.onerror = null
-      releasePlaybackUrl()
-      onError('Unable to play buffered audio')
-      onRemoteStopped?.()
-    }
-
-    playbackAudioRef.current = audioEl
-
-    audioEl
-      .play()
-      .then(() => {
-        onRemoteStarted?.()
-      })
-      .catch((error) => {
-        console.warn('Buffered playback failed', error)
-        releasePlaybackUrl()
-        onError('Unable to play buffered audio')
-        onRemoteStopped?.()
-      })
-  }, [onError, onRemoteStarted, onRemoteStopped, releasePlaybackUrl])
-
-  const stopRecorder = useCallback((options?: { allowPlayback: boolean }) => {
-    const recorder = recorderRef.current
-    if (!recorder) return
-
-    if (options?.allowPlayback === false) {
-      playbackRequestedRef.current = false
-    }
-
-    if (recorder.state !== 'inactive') {
-      try {
-        recorder.stop()
-      } catch (error) {
-        console.warn('Failed to stop media recorder cleanly', error)
-      }
-    }
-
-    recorderRef.current = null
-  }, [])
-
-  const cleanupPlayback = useCallback(() => {
-    if (playbackAudioRef.current) {
-      playbackAudioRef.current.pause()
-      playbackAudioRef.current.removeAttribute('src')
-      playbackAudioRef.current.load()
-    }
-    releasePlaybackUrl()
-  }, [releasePlaybackUrl])
+  const updateStatus = useCallback(
+    (status: 'connecting' | 'connected' | 'disconnected') => {
+      setConnectionState(status)
+      onStatusChange(status)
+    },
+    [onStatusChange]
+  )
 
   const cleanup = useCallback(
     (notify = true) => {
-      wantRecordingRef.current = false
-      playbackRequestedRef.current = false
-
-      stopRecorder({ allowPlayback: false })
-      recordedChunksRef.current = []
-      cleanupPlayback()
-
       peerRef.current?.close()
       peerRef.current = null
 
       localTracksRef.current.forEach((track) => {
-        track.enabled = false
         track.stop()
       })
       localTracksRef.current = []
 
       if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach((track) => {
-          track.enabled = false
-          track.stop()
-        })
+        localStreamRef.current.getTracks().forEach((track) => track.stop())
         localStreamRef.current = null
       }
 
-      remoteStreamRef.current = null
+      if (remoteStreamRef.current) {
+        remoteStreamRef.current.getTracks().forEach((track) => track.stop())
+        remoteStreamRef.current = null
+      }
+
+      if (remoteAudioElementRef.current) {
+        remoteAudioElementRef.current.srcObject = null
+      }
 
       setIsTalking(false)
-      setConnectionState('disconnected')
+      updateStatus('disconnected')
       if (notify) {
-        onStatusChange('disconnected')
         onRemoteStopped?.()
       }
     },
-    [cleanupPlayback, onRemoteStopped, onStatusChange, stopRecorder]
+    [onRemoteStopped, updateStatus]
   )
 
   useEffect(() => {
-    return () => cleanup(false)
+    return () => {
+      cleanup(false)
+    }
   }, [cleanup])
 
   const waitForIceGathering = async (pc: RTCPeerConnection) => {
     if (pc.iceGatheringState === 'complete') return
     await new Promise<void>((resolve) => {
-      const handleStateChange = () => {
+      const checkState = () => {
         if (pc.iceGatheringState === 'complete') {
-          pc.removeEventListener('icegatheringstatechange', handleStateChange)
+          pc.removeEventListener('icegatheringstatechange', checkState)
           resolve()
         }
       }
-      pc.addEventListener('icegatheringstatechange', handleStateChange)
+      pc.addEventListener('icegatheringstatechange', checkState)
     })
   }
 
@@ -243,50 +124,28 @@ export const useWebRTC = ({
     [apiBaseUrl]
   )
 
-  const startRecorder = useCallback(() => {
-    if (!wantRecordingRef.current) return
-    if (!remoteStreamRef.current) return
-    if (!recorderOptions) {
-      onError('MediaRecorder is not supported; buffered playback is unavailable')
-      return
+  const ensureRemoteAudioElement = useCallback(() => {
+    if (remoteAudioRef?.current) {
+      remoteAudioElementRef.current = remoteAudioRef.current
+      return remoteAudioRef.current
     }
 
-    if (recorderRef.current && recorderRef.current.state !== 'inactive') {
-      return
+    if (!remoteAudioElementRef.current) {
+      const audio = new Audio()
+      audio.autoplay = true
+      audio.controls = false
+      audio.crossOrigin = 'anonymous'
+      remoteAudioElementRef.current = audio
     }
-
-    try {
-      const recorder = new MediaRecorder(remoteStreamRef.current, recorderOptions)
-      recorderRef.current = recorder
-      recordedMimeRef.current =
-        recorder.mimeType || (recorderOptions.mimeType as string) || 'audio/webm'
-      recordedChunksRef.current = []
-
-      recorder.ondataavailable = (event) => {
-        if (event.data && event.data.size > 0) {
-          recordedChunksRef.current.push(event.data)
-        }
-      }
-
-      recorder.onstop = () => {
-        recorder.ondataavailable = null
-        recorder.onstop = null
-        recorderRef.current = null
-        finalizePlayback()
-      }
-
-      recorder.start()
-    } catch (error) {
-      console.error('Failed to start media recorder', error)
-      onError('Unable to buffer remote audio in this browser')
-    }
-  }, [finalizePlayback, onError, recorderOptions])
+    return remoteAudioElementRef.current
+  }, [remoteAudioRef])
 
   const connect = useCallback(async () => {
-    if (peerRef.current) return
+    if (peerRef.current) {
+      return
+    }
 
-    onStatusChange('connecting')
-    setConnectionState('connecting')
+    updateStatus('connecting')
 
     try {
       const localStream = await navigator.mediaDevices.getUserMedia({
@@ -310,93 +169,62 @@ export const useWebRTC = ({
       })
 
       pc.ontrack = (event) => {
-        const [remoteStream] = event.streams
-        if (remoteStream) {
-          remoteStreamRef.current = remoteStream
-        } else {
-          remoteStreamRef.current = new MediaStream([event.track])
+        const [stream] = event.streams
+        remoteStreamRef.current = stream ?? new MediaStream([event.track])
+        const audioEl = ensureRemoteAudioElement()
+        if (audioEl.srcObject !== remoteStreamRef.current) {
+          audioEl.srcObject = remoteStreamRef.current
         }
-
-        event.track.onended = () => {
-          if (!wantRecordingRef.current) {
-            return
-          }
-          stopRecorder()
-        }
-
-        if (wantRecordingRef.current) {
-          startRecorder()
-        }
+        audioEl
+          .play()
+          .then(() => onRemoteStarted?.())
+          .catch((error) => {
+            console.warn('Failed to start remote playback', error)
+            onError('Unable to start remote audio playback')
+          })
       }
 
       pc.onconnectionstatechange = () => {
         const state = pc.connectionState
         if (state === 'connected') {
-          setConnectionState('connected')
-          onStatusChange('connected')
-        } else if (state === 'failed' || state === 'disconnected' || state === 'closed') {
+          updateStatus('connected')
+        }
+        if (state === 'disconnected' || state === 'failed' || state === 'closed') {
           cleanup()
         }
       }
 
       await negotiateConnection(pc)
+      updateStatus('connected')
     } catch (error) {
-      console.error('Failed to establish WebRTC connection', error)
-      cleanup()
-      onError(error instanceof Error ? error.message : 'Unable to establish WebRTC connection')
+      console.error('Failed to establish WebRTC session', error)
+      cleanup(false)
+      onError('Failed to establish WebRTC session')
+      throw error
     }
-  }, [cleanup, negotiateConnection, onError, onStatusChange, startRecorder, stopRecorder])
+  }, [cleanup, ensureRemoteAudioElement, negotiateConnection, onError, onRemoteStarted, updateStatus])
 
   const disconnect = useCallback(() => {
     cleanup()
   }, [cleanup])
 
-  const startTalking = useCallback(() => {
-    if (!peerRef.current || connectionState !== 'connected') {
-      onError('Connect to the worker before speaking')
-      return
-    }
-
-    wantRecordingRef.current = true
-    playbackRequestedRef.current = false
-    recordedChunksRef.current = []
-    cleanupPlayback()
-
-    setIsTalking(true)
-
+  const setTalkingState = useCallback((enabled: boolean) => {
     localTracksRef.current.forEach((track) => {
-      track.enabled = true
+      track.enabled = enabled
     })
+    setIsTalking(enabled)
+  }, [])
 
-    if (remoteStreamRef.current) {
-      startRecorder()
+  const startTalking = useCallback(() => {
+    if (!peerRef.current) {
+      void connect().catch(() => undefined)
     }
-  }, [cleanupPlayback, connectionState, onError, startRecorder])
+    setTalkingState(true)
+  }, [connect, setTalkingState])
 
   const stopTalking = useCallback(() => {
-    if (!peerRef.current) return
-
-    wantRecordingRef.current = false
-    playbackRequestedRef.current = true
-
-    localTracksRef.current.forEach((track) => {
-      track.enabled = false
-    })
-
-    setIsTalking(false)
-
-    if (recorderRef.current && recorderRef.current.state === 'recording') {
-      setTimeout(() => {
-        if (recorderRef.current && recorderRef.current.state === 'recording') {
-          stopRecorder()
-        } else {
-          finalizePlayback()
-        }
-      }, REMOTE_FLUSH_DELAY_MS)
-    } else {
-      finalizePlayback()
-    }
-  }, [finalizePlayback, stopRecorder])
+    setTalkingState(false)
+  }, [setTalkingState])
 
   return {
     connect,

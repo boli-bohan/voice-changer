@@ -4,17 +4,16 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import logging
 import librosa
 import numpy as np
-import soundfile as sf
-from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc import RTCPeerConnection, RTCSessionDescription, RTCDataChannel
 from aiortc.mediastreams import MediaStreamTrack
 from av import AudioFrame
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from duration_track import DurationLoggingTrack
 from worker import WorkerContext, WorkerSettings, make_worker_app
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -33,138 +32,165 @@ class SDPModel(BaseModel):
 
 TARGET_SAMPLE_RATE = 48_000
 DEFAULT_PITCH_SHIFT = 4.0
+MAX_BUFFER_FRAMES = 1
 
 
 class PitchShiftTrack(MediaStreamTrack):
-    """Forward PCM frames while applying a pitch shift when requested."""
+    """Buffering track that pitch-shifts audio in batches before forwarding."""
 
     kind = "audio"
 
-    def __init__(self, source: MediaStreamTrack, pitch_shift_semitones: float = DEFAULT_PITCH_SHIFT):
-        """Initialize the track wrapper that performs pitch shifting on audio frames.
-
-        Args:
-            source: Upstream media track supplying PCM audio frames.
-            pitch_shift_semitones: Number of semitones to shift the audio signal.
-        """
+    def __init__(
+        self,
+        source: MediaStreamTrack,
+        pitch_shift_semitones: float = DEFAULT_PITCH_SHIFT,
+        max_buffer_frames: int = MAX_BUFFER_FRAMES,
+    ) -> None:
         super().__init__()
         self._source = source
         self._pitch_shift = pitch_shift_semitones
+        self._max_buffer = max(1, max_buffer_frames)
+        self._input_buffer: list[AudioFrame] = []
+        self._output_buffer: list[AudioFrame] = []
+        self._should_flush = asyncio.Event()
+        self._flush_done = asyncio.Event()
+        self._flush_done.set()
+
         self._frame_count = 0
         self._input_samples_total = 0
         self._output_samples_total = 0
         self._last_input_rate = TARGET_SAMPLE_RATE
         self._last_output_rate = TARGET_SAMPLE_RATE
 
+    async def flush(self) -> None:
+        """Flush any buffered audio and wait until completion."""
+
+        self._should_flush.set()
+        if self._flush_done.is_set():
+            self._flush_done.clear()
+
+        if self._input_buffer:
+            self._process_buffer()
+
+        if not self._output_buffer:
+            self._should_flush.clear()
+            self._flush_done.set()
+            return
+
+        await self._flush_done.wait()
+
     async def recv(self) -> AudioFrame:
-        """Receive, transform, and return the next audio frame from the source.
+        """Return the next processed frame, buffering input as needed."""
 
-        Returns:
-            Audio frame with the configured pitch shift applied.
-        """
-        frame: AudioFrame = await self._source.recv()
-        self._frame_count += 1
+        while True:
+            # Drain any frames that were already pitch-shifted.
+            if self._output_buffer:
+                frame = self._output_buffer.pop(0)
+                if not self._output_buffer and self._should_flush.is_set():
+                    self._should_flush.clear()
+                    self._flush_done.set()
+                return frame
 
-        sample_rate = frame.sample_rate or TARGET_SAMPLE_RATE
-        format_name = frame.format.name
-        layout_name = frame.layout.name
+            # If a flush was requested but no output is queued yet, process the input buffer.
+            if self._should_flush.is_set():
+                if self._input_buffer:
+                    self._process_buffer()
+                    continue
+                self._should_flush.clear()
+                self._flush_done.set()
+                continue
 
-        pcm = frame.to_ndarray()
-        audio_data = np.asarray(pcm, dtype=np.int16)
-        if audio_data.size == 0 or abs(self._pitch_shift) < 1e-6:
-            return frame
+            # Wait for either a new source frame or a flush notification.
+            source_task = asyncio.create_task(self._source.recv())
+            flush_task = asyncio.create_task(self._should_flush.wait())
 
-        if audio_data.ndim == 1:
-            data_for_io = audio_data
-            frame_samples = audio_data.shape[0]
-        else:
-            data_for_io = audio_data.transpose(1, 0)
-            frame_samples = audio_data.shape[1]
+            done, pending = await asyncio.wait(
+                [source_task, flush_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
 
+            # Cancel whichever task did not finish so we avoid leaks.
+            for task in pending:
+                task.cancel()
+
+            if flush_task in done and self._should_flush.is_set():
+                if self._input_buffer:
+                    self._process_buffer()
+                else:
+                    self._should_flush.clear()
+                    self._flush_done.set()
+                continue
+
+            # Consume the newly received source frame and append it to the input buffer.
+            frame: AudioFrame = source_task.result()
+            self._input_buffer.append(frame)
+            if len(self._input_buffer) >= self._max_buffer:
+                self._process_buffer()
+
+    def _process_buffer(self) -> None:
+        if not self._input_buffer:
+            return
+
+        frames = self._input_buffer
+        self._input_buffer = []
+
+        reference_frame = frames[0]
+        sample_rate = reference_frame.sample_rate or TARGET_SAMPLE_RATE
         self._last_input_rate = sample_rate
-        self._input_samples_total += frame_samples
-        self._log_progress("recv", self._input_samples_total, self._last_input_rate)
 
-        if self._frame_count % 100 == 1:
-            logger.info(
-                "📊 Processing frame #%d: sample_rate=%s format=%s layout=%s pitch_shift=%.2f",
-                self._frame_count,
-                sample_rate,
-                format_name,
-                layout_name,
-                self._pitch_shift,
+        channel_arrays: list[np.ndarray] = []
+        frame_lengths: list[int] = []
+        frame_meta: list[tuple[AudioFrame, int]] = []
+
+        for frame in frames:
+            array = frame.to_ndarray()
+            array = np.asarray(array)
+            if array.ndim == 1:
+                array = array[np.newaxis, :]
+            frame_lengths.append(array.shape[-1])
+            frame_meta.append((frame, array.shape[-1]))
+            if array.dtype != np.int16:
+                array = array.astype(np.float32)
+                array = np.clip(array, -1.0, 1.0)
+                array = (array * 32767.0).astype(np.int16)
+            channel_arrays.append(array)
+
+        concatenated = np.concatenate(channel_arrays, axis=-1)
+        total_samples = concatenated.shape[-1]
+        self._input_samples_total += total_samples
+
+        float_audio = concatenated.astype(np.float32) / 32767.0
+
+        shifted_channels: list[np.ndarray] = []
+        for ch in range(float_audio.shape[0]):
+            shifted_channel = librosa.effects.pitch_shift(
+                float_audio[ch], sr=sample_rate, n_steps=self._pitch_shift
             )
+            shifted_channel = librosa.util.fix_length(shifted_channel, size=total_samples)
+            shifted_channels.append(shifted_channel.astype(np.float32))
 
-        with io.BytesIO() as buffer:
-            sf.write(
-                buffer,
-                np.ascontiguousarray(data_for_io),
-                sample_rate,
-                subtype="PCM_16",
-                format="WAV",
-            )
-            buffer.seek(0)
-            float_samples, loaded_sr = librosa.load(
-                buffer,
-                sr=sample_rate,
-                mono=False,
-            )
-
-        if float_samples.ndim == 1:
-            float_samples = float_samples[np.newaxis, :]
-
-        try:
-            shifted_channels: list[np.ndarray] = []
-            for channel in range(float_samples.shape[0]):
-                channel_shifted = librosa.effects.pitch_shift(
-                    float_samples[channel],
-                    sr=loaded_sr,
-                    n_steps=self._pitch_shift,
-                )
-                channel_shifted = librosa.util.fix_length(channel_shifted, size=frame_samples)
-                shifted_channels.append(channel_shifted.astype(np.float32))
-            shifted = np.stack(shifted_channels, axis=0)
-        except Exception as exc:  # pragma: no cover - defensive logging
-            logger.error("Pitch shifting error: %s", exc)
-            return frame
-
+        shifted = np.stack(shifted_channels, axis=0)
         shifted = np.clip(shifted, -1.0, 1.0)
         shifted_pcm = (shifted * 32767.0).astype(np.int16)
 
-        if shifted_pcm.ndim == 1:
-            array = shifted_pcm[np.newaxis, :]
-        else:
-            array = shifted_pcm
+        offset = 0
+        for original_frame, length in frame_meta:
+            slice_end = offset + length
+            slice_array = shifted_pcm[:, offset:slice_end]
+            offset = slice_end
 
-        out_frame = AudioFrame.from_ndarray(np.ascontiguousarray(array), format=format_name, layout=layout_name)
-        out_frame.sample_rate = loaded_sr
-        out_frame.pts = frame.pts
-        out_frame.time_base = frame.time_base
+            out_frame = AudioFrame.from_ndarray(
+                np.ascontiguousarray(slice_array),
+                format=original_frame.format.name,
+                layout=original_frame.layout.name,
+            )
+            out_frame.sample_rate = sample_rate
+            out_frame.pts = original_frame.pts
+            out_frame.time_base = original_frame.time_base
+            self._output_buffer.append(out_frame)
 
-        self._last_output_rate = loaded_sr
-        self._output_samples_total += frame_samples
-        self._log_progress("send", self._output_samples_total, self._last_output_rate)
-
-        return out_frame
-
-    def _log_progress(self, direction: str, total_samples: int, sample_rate: int) -> None:
-        """Emit structured logs describing audio throughput.
-
-        Args:
-            direction: Indicates whether logging covers received or sent samples.
-            total_samples: Aggregate sample count processed to date.
-            sample_rate: Sample rate used when converting to seconds of audio.
-        """
-        if not sample_rate or total_samples <= 0:
-            return
-        duration = total_samples / float(sample_rate)
-        logger.info(
-            "🎚️ Worker %s cumulative duration: %.3f s (samples=%d, rate=%d)",
-            direction,
-            duration,
-            total_samples,
-            sample_rate,
-        )
+        self._last_output_rate = sample_rate
+        self._output_samples_total += total_samples
 
 
 SETTINGS = WorkerSettings(
@@ -183,12 +209,26 @@ def register_routes(app: FastAPI, ctx: WorkerContext) -> None:
         logger.info("📡 Received new WebRTC offer; active peers: %d", len(ctx.active_peers))
 
         cleanup_started = False
+        duration_wrappers: list[DurationLoggingTrack] = []
+        control_channel: RTCDataChannel | None = None
+        pitch_track: PitchShiftTrack | None = None
+        track_ready = asyncio.Event()
 
         async def cleanup() -> None:
             nonlocal cleanup_started
             if cleanup_started:
                 return
             cleanup_started = True
+
+            while duration_wrappers:
+                duration_wrappers.pop().stop()
+            if pitch_track is not None:
+                pitch_track.stop()
+            if control_channel and control_channel.readyState == "open":
+                try:
+                    control_channel.close()
+                except Exception:
+                    logger.exception("Failed to close control data channel")
             await ctx.cleanup_peer(pc)
 
         @pc.on("connectionstatechange")
@@ -197,17 +237,48 @@ def register_routes(app: FastAPI, ctx: WorkerContext) -> None:
             if pc.connectionState in {"failed", "closed", "disconnected"}:
                 await cleanup()
 
-        track_ready = asyncio.Event()
+        @pc.on("datachannel")
+        def on_datachannel(channel: RTCDataChannel) -> None:
+            nonlocal control_channel, pitch_track
+            control_channel = channel
+            logger.info("🛰️ Control data channel established: %s", channel.label)
+
+            @channel.on("message")
+            async def on_message(message: object) -> None:
+                if isinstance(message, bytes):
+                    try:
+                        message = message.decode("utf-8")
+                    except Exception:
+                        logger.warning("Received non-UTF8 control message; ignoring")
+                        return
+
+                if not isinstance(message, str):
+                    logger.debug("Ignoring non-string control payload: %r", message)
+                    return
+
+                logger.info("📨 Control message received: %s", message)
+
+                if message.strip().lower() == "flush":
+                    # Flush the echo track and wait for the flush to complete.
+                    await pitch_track.flush()
+                    channel.send("flush_done")
+                    logger.info("🚰 Flush requested and completed")
+                else:
+                    logger.debug("Unhandled control message: %s", message)
 
         @pc.on("track")
         async def on_track(track: MediaStreamTrack) -> None:
+            nonlocal pitch_track
             logger.info("🎙️ Incoming track: %s", track.kind)
             if track.kind != "audio":
                 logger.debug("Ignoring non-audio track of kind %s", track.kind)
                 return
 
-            transformed = PitchShiftTrack(track)
-            pc.addTrack(transformed)
+            recv_logger = DurationLoggingTrack(track, label="recv", log_interval=0.5)
+            pitch_track = PitchShiftTrack(recv_logger, max_buffer_frames=MAX_BUFFER_FRAMES)
+            send_logger = DurationLoggingTrack(pitch_track, label="send", log_interval=0.5)
+            duration_wrappers.extend([send_logger, recv_logger])
+            pc.addTrack(send_logger)
             track_ready.set()
 
             @track.on("ended")

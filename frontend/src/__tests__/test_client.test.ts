@@ -40,7 +40,9 @@ function loadInputSamples(): Int16Array {
   return pcm
 }
 
-async function waitForIceCompletion(pc: RTCPeerConnection): Promise<void> {
+type NodeRTCPeerConnection = InstanceType<typeof RTCPeerConnection>
+
+async function waitForIceCompletion(pc: NodeRTCPeerConnection): Promise<void> {
   while (pc.iceGatheringState !== 'complete') {
     await delay(50)
   }
