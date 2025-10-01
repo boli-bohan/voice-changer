@@ -1,0 +1,86 @@
+{{- if .Values.turn.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "voice-changer.turn.fullname" . }}
+  labels:
+    {{- include "voice-changer.turn.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.turn.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "voice-changer.turn.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "voice-changer.turn.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- if .Values.turn.hostNetwork }}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      {{- end }}
+      containers:
+      - name: {{ .Values.turn.name }}
+        image: "{{ .Values.turn.image.repository }}:{{ .Values.turn.image.tag }}"
+        imagePullPolicy: {{ .Values.turn.image.pullPolicy }}
+        ports:
+        - containerPort: {{ .Values.turn.ports.tcp }}
+          name: turn-tcp
+        - containerPort: {{ .Values.turn.ports.tls }}
+          name: turn-tls
+        env:
+        {{- if .Values.turn.credentials.static.enabled }}
+        - name: TURN_STATIC_USER
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "voice-changer.turn.secretName" . }}
+              key: username
+        - name: TURN_STATIC_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "voice-changer.turn.secretName" . }}
+              key: password
+        {{- end }}
+        - name: TURN_REALM
+          value: {{ .Values.turn.relay.realm | quote }}
+        {{- if .Values.turn.relay.publicIP }}
+        - name: TURN_PUBLIC_IP
+          value: {{ .Values.turn.relay.publicIP | quote }}
+        {{- end }}
+        args:
+        - /bin/sh
+        - -c
+        - |
+          turnserver \
+          --log-file=stdout \
+          --no-cli \
+          --listening-port={{ .Values.turn.ports.tcp }} \
+          --tls-listening-port={{ .Values.turn.ports.tls }} \
+          --fingerprint \
+          {{- if .Values.turn.credentials.static.enabled }}
+          --lt-cred-mech \
+          --user="${TURN_STATIC_USER}:${TURN_STATIC_PASSWORD}" \
+          {{- end }}
+          --realm="${TURN_REALM}" \
+          --min-port={{ .Values.turn.ports.udp.min }} \
+          --max-port={{ .Values.turn.ports.udp.max }} \
+          --no-software-attribute \
+          {{- if .Values.turn.relay.publicIP }}
+          --external-ip="${TURN_PUBLIC_IP}" \
+          {{- end }}
+          --verbose
+        resources:
+          {{- toYaml .Values.turn.resources | nindent 10 }}
+      {{- with .Values.turn.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.turn.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.turn.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
